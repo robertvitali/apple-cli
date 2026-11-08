@@ -1088,6 +1088,7 @@ public struct ChatDB {
         let bodyKnown: Bool
         let body: String?
         let thread_originator: ExactThreadOriginator
+        let sendState: ReplySendState
     }
 
     struct ExactReplyRowScan {
@@ -1574,6 +1575,7 @@ public struct ChatDB {
 
     func exactReplyHighwater(chatRowid: Int64) throws -> Int64 {
         guard chatRowid > 0 else { throw AppleError.validation("chatRowid must be > 0") }
+        _ = try requiredColumns("message", ["is_sent", "error"])
         try validateExactReplyMembershipEvidence(chatRowid: chatRowid)
         // A previously stored message can acquire its chat membership after dispatch.
         let rows = try reader.rows("SELECT COALESCE(MAX(ROWID), 0) AS max_rowid FROM message")
@@ -1591,10 +1593,16 @@ public struct ChatDB {
         let originatorSelect = schema.threadOriginatorColumnsAvailable
             ? "m.thread_originator_guid AS thread_originator_guid, m.thread_originator_part AS thread_originator_part"
             : "NULL AS thread_originator_guid, NULL AS thread_originator_part"
+        // Read status in the same scan as the reply identity and body. A malformed
+        // value can be arbitrarily large, so only project stored integers.
+        let sendStatus = schema.messageColumns.isSuperset(of: ["is_sent", "error"])
+            ? "CASE WHEN typeof(m.is_sent)='integer' THEN m.is_sent END AS is_sent, "
+                + "CASE WHEN typeof(m.error)='integer' THEN m.error END AS error"
+            : "NULL AS is_sent, NULL AS error"
         let rows = try reader.rows("""
             SELECT m.ROWID AS rowid, m.guid AS message_guid, m.text AS text,
                    m.attributedBody AS attributedBody, m.is_from_me AS is_from_me,
-                   \(originatorSelect), cmj.chat_id AS join_chat_id,
+                   \(sendStatus), \(originatorSelect), cmj.chat_id AS join_chat_id,
                    cmj.message_id AS join_message_id, c.ROWID AS selected_chat_rowid
             FROM chat_message_join cmj
             JOIN chat c ON c.ROWID = cmj.chat_id
@@ -1713,6 +1721,13 @@ public struct ChatDB {
         }
         guard matches.count == 1 else {
             return replyUncertain("duplicate-matching-replies")
+        }
+        switch match.sendState {
+        case .sent: break
+        case .pending:
+            return ExactReplyCorrespondence(status: "waiting", reason: nil, message_rowid: nil,
+                                            message_guid: nil, parent_message_guid: nil, parent_native_part: nil)
+        case .uncertain(let reason): return replyUncertain(reason)
         }
         return ExactReplyCorrespondence(status: "verified", reason: nil, message_rowid: match.rowid,
                                         message_guid: match.message_guid,
@@ -1842,13 +1857,13 @@ public struct ChatDB {
         }
     }
 
-    private enum AttachmentReplySendState {
+    enum ReplySendState {
         case sent
         case pending
         case uncertain(String)
     }
 
-    private func attachmentReplySendState(_ candidate: ExactReplyRow) throws -> AttachmentReplySendState {
+    private func attachmentReplySendState(_ candidate: ExactReplyRow) throws -> ReplySendState {
         let columns = try requiredColumns("message", ["ROWID"])
         guard columns.isSuperset(of: ["error", "is_sent"]) else {
             return .uncertain("matching-row-send-state-unavailable")
@@ -1861,8 +1876,14 @@ public struct ChatDB {
               case .text(let guid)? = row.values["guid"], guid == candidate.message_guid,
               case .integer(1)? = row.values["is_from_me"],
               case .text(let parent)? = row.values["thread_originator_guid"], parent == candidate.thread_originator.message_guid,
-              case .text(let part)? = row.values["thread_originator_part"], part == candidate.thread_originator.raw_part,
-              case .integer(let error)? = row.values["error"] else {
+              case .text(let part)? = row.values["thread_originator_part"], part == candidate.thread_originator.raw_part else {
+            return .uncertain("matching-row-send-state-unavailable")
+        }
+        return Self.replySendState(row)
+    }
+
+    private static func replySendState(_ row: SQLiteReader.Row) -> ReplySendState {
+        guard case .integer(let error)? = row.values["error"] else {
             return .uncertain("matching-row-send-state-unavailable")
         }
         guard error == 0 else { return .uncertain("matching-row-send-failed") }
@@ -2273,7 +2294,8 @@ public struct ChatDB {
                                  is_from_me: ownership.isFromMe,
                                  bodyKnown: body.known,
                                  body: body.body,
-                                 thread_originator: Self.exactThreadOriginator(row, columnsAvailable: schema.threadOriginatorColumnsAvailable))
+                                 thread_originator: Self.exactThreadOriginator(row, columnsAvailable: schema.threadOriginatorColumnsAvailable),
+                                 sendState: Self.replySendState(row))
         }
     }
 

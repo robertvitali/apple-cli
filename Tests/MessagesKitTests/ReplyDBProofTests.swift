@@ -526,7 +526,7 @@ struct ReplyDBProofTests {
                                                       message_guid: "reply-root", raw_part: "2", native_part: 2)
         let missingGUID = ChatDB.ExactReplyRow(rowid: 61, message_guid: nil, messageGUIDMalformed: false,
                                                selected_chat_rowid: 3, ownershipKnown: true, is_from_me: true,
-                                               bodyKnown: true, body: "sent", thread_originator: originator)
+                                               bodyKnown: true, body: "sent", thread_originator: originator, sendState: .sent)
         let missingProof = try ChatDB.judgeExactReplyCorrespondence(
             scan: ChatDB.ExactReplyRowScan(chat_rowid: 3, after_highwater: 60,
                                            row_limit: ChatDB.ExactReplyRowScan.rowLimit,
@@ -538,7 +538,7 @@ struct ReplyDBProofTests {
 
         let wrongChat = ChatDB.ExactReplyRow(rowid: 62, message_guid: "result", messageGUIDMalformed: false,
                                              selected_chat_rowid: 4, ownershipKnown: true, is_from_me: true,
-                                             bodyKnown: true, body: "sent", thread_originator: originator)
+                                             bodyKnown: true, body: "sent", thread_originator: originator, sendState: .sent)
         let wrongChatProof = try ChatDB.judgeExactReplyCorrespondence(
             scan: ChatDB.ExactReplyRowScan(chat_rowid: 3, after_highwater: 60,
                                            row_limit: ChatDB.ExactReplyRowScan.rowLimit,
@@ -588,6 +588,24 @@ struct ReplyDBProofTests {
         #expect(second.message_guid == "delayed")
     }
 
+    @Test func textReplyWaitsForTheSameOutgoingRowToBecomeSent() throws {
+        let fx = try replyFixture()
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        let id = highwater + 1
+        try insertReplyResult(fx, rowid: id, guid: "outgoing", text: "sent", chatRowid: 3,
+                              parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
+        for sent in [0, 1] {
+            try fx.exec("UPDATE message SET is_sent=\(sent) WHERE ROWID=\(id)")
+            db = try makeDB(fx)
+            let scan = try db.exactReplyRows(chatRowid: 3, afterHighwater: highwater)
+            let proof = try ChatDB.judgeExactReplyCorrespondence(scan: scan, target: target, expectedText: "sent")
+            #expect(proof.status == (sent == 0 ? "waiting" : "verified"))
+            #expect(proof.message_rowid == (sent == 0 ? nil : id))
+        }
+    }
+
     @Test(arguments: ["sent", "pending", "failed", "unknown", "second-outgoing"])
     func nestedRootAttachmentProofPreservesSendStateAndAmbiguity(scenario: String) throws {
         let fx = try replyFixture()
@@ -624,6 +642,38 @@ struct ReplyDBProofTests {
         case "failed": #expect(root.reason == "matching-row-send-failed")
         case "unknown": #expect(root.reason == "matching-row-send-state-unavailable")
         default: #expect(root.reason == "multiple-fresh-outgoing")
+        }
+    }
+
+    @Test(arguments: ["NULL", "text", "attributedBody"])
+    func attachmentReplyDistinguishesMissingBodyFromEmptyBlob(_ storedBody: String) throws {
+        let fx = try replyFixture()
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        let rowid = highwater + 1
+        try insertAttachmentReplyResult(fx, rowid: rowid, guid: "reply-file", textSQL: "NULL", chatRowid: 3,
+                                        parentGUID: "reply-root", parentPart: "2", attachmentRowid: 401,
+                                        attachmentGUID: "reply-attachment",
+                                        filename: "~/Library/Messages/Attachments/zz/apple-cli-present.png",
+                                        totalBytesSQL: "3")
+        try fx.exec("UPDATE message SET is_sent=1 WHERE ROWID=\(rowid)")
+        if storedBody == "text" {
+            try fx.exec("UPDATE message SET text=X'' WHERE ROWID=\(rowid)")
+        } else if storedBody == "attributedBody" {
+            try fx.exec("UPDATE message SET attributedBody=X'' WHERE ROWID=\(rowid)")
+        }
+        db = try makeDB(fx)
+        let proof = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater,
+                                                              target: target, expectedAttachmentSHA256: sha256(Data([1, 2, 3])),
+                                                              expectedAttachmentSize: 3)
+        if storedBody == "NULL" {
+            #expect(proof.status == "verified")
+            #expect(proof.message_guid == "reply-file")
+        } else {
+            #expect(proof.status == "uncertain")
+            #expect(proof.reason == "unknown-outgoing-body")
+            #expect(proof.message_guid == nil)
         }
     }
 

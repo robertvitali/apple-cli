@@ -643,9 +643,18 @@ public final class SQLiteReader {
                         values[name] = .text(text)
                     } else { values[name] = .null }
                 case SQLITE_BLOB:
-                    if let b = sqlite3_column_blob(stmt, col) {
-                        values[name] = .blob(Data(bytes: b, count: Int(sqlite3_column_bytes(stmt, col))))
-                    } else { values[name] = .null }
+                    // SQLite may return a nil pointer for a BLOB of length zero.
+                    let count = Int(sqlite3_column_bytes(stmt, col))
+                    if count == 0 {
+                        guard sqlite3_errcode(db) != SQLITE_NOMEM else {
+                            throw DBError.step(String(cString: sqlite3_errmsg(db)))
+                        }
+                        values[name] = .blob(Data())
+                    } else if let bytes = sqlite3_column_blob(stmt, col) {
+                        values[name] = .blob(Data(bytes: bytes, count: count))
+                    } else {
+                        throw DBError.step(String(cString: sqlite3_errmsg(db)))
+                    }
                 default: values[name] = .null
                 }
             }

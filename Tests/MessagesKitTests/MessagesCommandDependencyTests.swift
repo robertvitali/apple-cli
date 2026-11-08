@@ -155,6 +155,7 @@ private extension ChatFixture {
     func insertReplyTarget(rowid: Int64, guid: String, text: String = "apple-cli-test target",
                            part: Int = 2, chatRowid: Int64 = 3) throws {
         try addThreadOriginatorColumns()
+        try exec("ALTER TABLE message ADD COLUMN is_sent INTEGER DEFAULT 1;")
         let body = commandNativeArchive(text, [
             (commandNativePartKey, NSNumber(value: part), commandReactionRange(text, "target")),
         ])
@@ -175,6 +176,7 @@ private extension ChatFixture {
 
     func insertNestedReplyTarget() throws {
         try addThreadOriginatorColumns()
+        try exec("ALTER TABLE message ADD COLUMN is_sent INTEGER DEFAULT 1;")
         let text = "apple-cli-test target"
         let body = commandNativeArchive(text, [
             (commandNativePartKey, NSNumber(value: 2), NSRange(location: 0, length: text.utf16.count))
@@ -2766,7 +2768,6 @@ struct MessagesCommandDependencyTests {
         let replyBase = fx.base
         let homePath = fx.homePath
         let preparedCopy = LockedBox<String?>(nil)
-        try fx.exec("ALTER TABLE message ADD COLUMN is_sent INTEGER DEFAULT 1;")
         let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
             let resolved = try action.resolve()
             let payload = try #require(resolved.command.payload)
@@ -3110,6 +3111,66 @@ struct MessagesCommandDependencyTests {
             #expect(result.exitCode == nil, Comment(rawValue: detail + result.stdout))
             #expect(verified.value == true)
         }
+    }
+
+    @Test(arguments: ["error", "is_sent"])
+    func replySendRefusesUnavailableStatusBeforeHandoff(_ column: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        try fx.exec("ALTER TABLE message DROP COLUMN \(column)")
+        let deps = replyDependencies(fx) { action in
+            _ = try action.resolve()
+            Issue.record("Missing send status allowed handoff preparation")
+            return .verificationFailed
+        }
+        let flags = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                     "--body", "apple-cli-test reply", "--test-mode"]
+        let preview = try captureCommand {
+            try ReplySend.parse(flags + ["--dry-run"]).run(dependencies: deps)
+        }
+        #expect(preview.exitCode == nil)
+        let execution = try captureCommand {
+            try ReplySend.parse(flags + ["--experimental-ui-handoff"]).run(dependencies: deps)
+        }
+        #expect(execution.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: execution.stdout)
+        #expect((error["message"] as? String)?.contains(column) == true)
+    }
+
+    @Test(arguments: ["failed", "pending", "malformed", "missing"], ["reply-selected", "reply-root"])
+    func textReplyRequiresPersistedSendStatus(_ state: String, _ parent: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        let path = fx.path
+        let base = fx.base
+        let operationID = UUID()
+        let handoffs = LockedBox(0)
+        let deps = replyDependencies(fx) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            handoffs.withLock { $0 += 1 }
+            try insertReplyResultRow(path: path, rowid: 1_000_000, guid: "outgoing", text: "apple-cli-test reply",
+                                     base: base, parentGUID: parent)
+            switch state {
+            case "failed": try execReplySQL(path: path, "UPDATE message SET error=4 WHERE ROWID=1000000")
+            case "pending": try execReplySQL(path: path, "UPDATE message SET is_sent=0 WHERE ROWID=1000000")
+            case "malformed": try execReplySQL(path: path, "UPDATE message SET is_sent=X'31' WHERE ROWID=1000000")
+            default: try execReplySQL(path: path, "ALTER TABLE message DROP COLUMN is_sent")
+            }
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            if let proof = try action.verify(resolved, response, context) {
+                return .observedState(operationID: operationID, verification: proof)
+            }
+            return .verificationFailed
+        }
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "71", "--body", "apple-cli-test reply",
+                                 "--experimental-ui-handoff", "--test-mode"]).run(dependencies: deps)
+        }
+        #expect(handoffs.value == 1)
+        #expect(result.exitCode == AppleExit.upstream)
     }
 
     @Test(arguments: [false, true])

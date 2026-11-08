@@ -67,3 +67,19 @@ struct SQLiteReaderURITests {
         #expect(SQLiteReader.readOnlyURI(forPath: "relative/immutable=1.db") == "relative/immutable=1.db")
     }
 }
+
+@Suite("SQLiteReader typed rows")
+struct SQLiteReaderTypedRowTests {
+    @Test func distinguishesSQLNullFromEmptyTextAndBlobs() throws {
+        let reader = try SQLiteReader(path: ":memory:")
+        let row = try #require(reader.rows("""
+            SELECT NULL AS missing, '' AS empty_text, X'' AS empty_blob,
+                   zeroblob(0) AS zero_blob, X'0001' AS binary
+            """).first)
+        #expect(row.values["missing"] == .null)
+        #expect(row.values["empty_text"] == .text(""))
+        #expect(row.values["empty_blob"] == .blob(Data()))
+        #expect(row.values["zero_blob"] == .blob(Data()))
+        #expect(row.values["binary"] == .blob(Data([0, 1])))
+    }
+}
