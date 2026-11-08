@@ -4,7 +4,7 @@ import AppleKit
 @testable import MessagesKit
 
 @Suite struct NativeMessageStatusTests {
-    private let columns = ["error", "is_delivered", "is_read", "date_delivered", "date_read"]
+    private let columns = ["error", "is_delivered", "is_read", "was_delivered_quietly", "did_notify_recipient", "date_delivered", "date_read"]
 
     private func fixture(columns present: [String]) throws -> ChatFixture {
         let fixture = try ChatFixture()
@@ -69,6 +69,28 @@ import AppleKit
         }
     }
 
+    @Test(arguments: [(0, 0), (1, 0), (0, 1), (1, 1), (-1, 2)])
+    func quietDeliveryAndNotificationAreIndependent(_ pair: (Int, Int)) throws {
+        let fixture = try fixture(columns: columns)
+        let (quiet, notified) = pair
+        try fixture.exec("""
+            UPDATE message SET was_delivered_quietly=\(quiet), did_notify_recipient=\(notified)
+            WHERE ROWID=1
+            """)
+        let status = try json(read(fixture).native_status)
+        for (column, raw) in [("was_delivered_quietly", quiet), ("did_notify_recipient", notified)] {
+            let field = try #require(status[column] as? [String: Any])
+            #expect(field["raw"] as? Int == raw)
+            if raw == 0 || raw == 1 {
+                #expect(field["status"] as? String == "available")
+                #expect(field["value"] as? Bool == (raw == 1))
+            } else {
+                #expect(field["status"] as? String == "invalid-boolean")
+                #expect(field["value"] is NSNull)
+            }
+        }
+    }
+
     @Test(arguments: [Int64.min, -1, 0, 1, 9_999_999_999, 10_000_000_000, 800_000_000_999_999_999, Int64.max])
     func timestampBoundaryNormalizationDoesNotRound(_ raw: Int64) throws {
         let fixture = try fixture(columns: columns)
@@ -108,7 +130,7 @@ import AppleKit
 
     @Test func paginatedHistoryMatchesGetWithoutInferringFlagsFromDates() throws {
         let fixture = try fixture(columns: columns)
-        try fixture.exec("UPDATE message SET error=0,is_delivered=0,is_read=1,date_delivered=10000000000,date_read=0 WHERE ROWID=1")
+        try fixture.exec("UPDATE message SET error=0,is_delivered=0,is_read=1,date_delivered=10000000000,date_read=0,was_delivered_quietly=1,did_notify_recipient=0 WHERE ROWID=1")
         var db = try ChatDB(path: fixture.path, book: AddressBook(contacts: [:]), copyToTemp: false,
                             homeDirectoryForTilde: fixture.homePath)
         let exact = try db.exactGet(chat: .rowid(3), message: .rowid(1)).1
@@ -123,6 +145,8 @@ import AppleKit
         #expect(exact.native_status.is_delivered.value == false)
         #expect(exact.native_status.date_delivered.status == "available")
         #expect(exact.native_status.is_read.value == true)
+        #expect(exact.native_status.was_delivered_quietly.value == true)
+        #expect(exact.native_status.did_notify_recipient.value == false)
         #expect(exact.native_status.date_read.status == "zero-sentinel")
         #expect(exact.message_guid == "g1")
         #expect(exact.body == "hello from friend")

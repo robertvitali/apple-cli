@@ -7,6 +7,8 @@ extension ChatDB {
         public let error: ErrorField
         public let is_delivered: BooleanField
         public let is_read: BooleanField
+        public let was_delivered_quietly: BooleanField
+        public let did_notify_recipient: BooleanField
         public let date_delivered: TimestampField
         public let date_read: TimestampField
 
@@ -63,7 +65,7 @@ extension ChatDB {
 /// Isolates optional native metadata from legacy reads and send-success proofs.
 enum NativeMessageStatusDecoder {
     private enum Column: String, CaseIterable {
-        case error, is_delivered, is_read, date_delivered, date_read
+        case error, is_delivered, is_read, was_delivered_quietly, did_notify_recipient, date_delivered, date_read
         var typeAlias: String { "native_status_\(rawValue)_type" }
         var valueAlias: String { "native_status_\(rawValue)_value" }
     }
@@ -86,6 +88,8 @@ enum NativeMessageStatusDecoder {
         let error = integer(row, .error)
         return Status(error: .init(status: error.status, raw: error.raw, is_error: error.raw.map { $0 != 0 }),
                       is_delivered: boolean(row, .is_delivered), is_read: boolean(row, .is_read),
+                      was_delivered_quietly: boolean(row, .was_delivered_quietly),
+                      did_notify_recipient: boolean(row, .did_notify_recipient),
                       date_delivered: timestamp(row, .date_delivered), date_read: timestamp(row, .date_read))
     }
 
