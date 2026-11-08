@@ -248,7 +248,10 @@ The child ACK has two accepted cleanup shapes: Messages may already have restore
 the original clean main composer, or the retained owned reply composer may be empty
 and closed with exactly one `AXCancel`. The parent records observed state only after
 that ACK and a fresh database proof: a new outgoing row in the same chat, after the
-pre-dispatch high-water mark, whose exact UTF-8 body matches the requested text.
+database-wide message ROWID high-water mark, whose exact UTF-8 body matches the
+requested text. The parent samples the mark during resolution and again after
+checking the composer, retaining the higher value. Moving an older message into
+the conversation cannot make it eligible as a fresh reply.
 Its native `thread_originator` GUID/part must match the selected target under strict
 selected-parent proof, or the independently bound root under the separately
 identified thread-root proof below. Unknown ownership, malformed

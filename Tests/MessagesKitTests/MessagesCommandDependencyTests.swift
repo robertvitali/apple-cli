@@ -3112,6 +3112,45 @@ struct MessagesCommandDependencyTests {
         }
     }
 
+    @Test(arguments: [false, true])
+    func replySendExcludesMatchingRowThatPredatesHandoff(linkedAfterPreflight: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let path = fx.path
+        let base = fx.base
+        if linkedAfterPreflight {
+            try fx.insertReplyResult(rowid: 1_000_000, guid: "existing", text: "apple-cli-test reply", chatRowid: 1)
+        }
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            if linkedAfterPreflight {
+                try execReplySQL(path: path, "UPDATE chat_message_join SET chat_id=3 WHERE message_id=1000000")
+            }
+            let id = UUID()
+            let response = WorkerResponse(schemaVersion: 1, operationID: id, nonce: id, category: .ack,
+                                          detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            if let proof = try action.verify(resolved, response, context) {
+                return .observedState(operationID: id, verification: proof)
+            }
+            return .verificationFailed
+        }, captureReplyCleanState: { _, _ in
+            if !linkedAfterPreflight {
+                try insertReplyResultRow(path: path, rowid: 1_000_000, guid: "existing",
+                                         text: "apple-cli-test reply", base: base)
+            }
+            return MessagesReplyCleanStateToken("synthetic-clean-state")
+        })
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+        #expect(!result.stdout.contains("sent_message_guid"))
+    }
+
     @Test func replySendExecuteVerifiesFreshDBCorrespondenceBeforeSuccess() throws {
         let fx = try ChatFixture()
         try fx.insertReplyTarget(rowid: 70, guid: "reply-target")

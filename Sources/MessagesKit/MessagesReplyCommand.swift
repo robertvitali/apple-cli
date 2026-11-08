@@ -172,7 +172,7 @@ private struct ReplyObservedVerification {
 private final class ReplyObservation: @unchecked Sendable {
     private let lock = NSLock()
     private var resolvedTarget: ReplyResolvedTarget?
-    private var cleanState: MessagesReplyCleanStateToken?
+    private var preflightEvidence: (cleanState: MessagesReplyCleanStateToken, highwater: Int64)?
     private var observedVerification: ReplyObservedVerification?
 
     func recordResolved(_ target: ReplyResolvedTarget) {
@@ -189,14 +189,14 @@ private final class ReplyObservation: @unchecked Sendable {
         }
     }
 
-    func recordCleanState(_ state: MessagesReplyCleanStateToken) {
-        lock.withLock { cleanState = state }
+    func recordPreflight(cleanState: MessagesReplyCleanStateToken, highwater: Int64) {
+        lock.withLock { preflightEvidence = (cleanState, highwater) }
     }
 
-    func startingCleanState() throws -> MessagesReplyCleanStateToken {
+    func preflight() throws -> (cleanState: MessagesReplyCleanStateToken, highwater: Int64) {
         try lock.withLock {
-            guard let cleanState else { throw WorkerProtocolError.malformedFrame }
-            return cleanState
+            guard let preflightEvidence else { throw WorkerProtocolError.malformedFrame }
+            return preflightEvidence
         }
     }
 
@@ -205,7 +205,7 @@ private final class ReplyObservation: @unchecked Sendable {
     }
 
     func target() -> ReplyResolvedTarget? { lock.withLock { resolvedTarget } }
-    func hasStartingCleanState() -> Bool { lock.withLock { cleanState != nil } }
+    func hasStartingCleanState() -> Bool { lock.withLock { preflightEvidence != nil } }
     func observed() -> ReplyObservedVerification? { lock.withLock { observedVerification } }
 }
 
@@ -270,21 +270,24 @@ private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDe
                 try requireReplyAccessibility(dependencies.accessibilityDiagnostic())
                 guard let payload = original.payload else { throw WorkerProtocolError.malformedFrame }
                 let clean = try dependencies.captureReplyCleanState(payload.probeRequest(), context.deadline)
-                observation.recordCleanState(clean)
+                guard let initialHighwater = original.highwater else { throw WorkerProtocolError.malformedFrame }
+                let dispatchDB = try dependencies.makeChatDB(book)
+                let dispatchHighwater = try dispatchDB.exactReplyHighwater(chatRowid: original.target.chat_rowid)
+                observation.recordPreflight(cleanState: clean, highwater: max(initialHighwater, dispatchHighwater))
                 return .requiresMutation
             },
             verify: { resolved, response, context in
                 let original = try observation.resolved(matching: resolved.command)
                 guard !context.isCancelled else { throw WorkerProtocolError.cancelled }
                 guard !context.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
-                guard response.category == .ack, MessagesReplySendACKDetail.isVerified(response.detail),
-                      let highwater = original.highwater else { return nil }
+                guard response.category == .ack, MessagesReplySendACKDetail.isVerified(response.detail) else { return nil }
+                let preflight = try observation.preflight()
+                let highwater = preflight.highwater
                 let proof = try pollReplyProof(dependencies: dependencies, book: book, expected: original,
                                                highwater: highwater, input: input, attachmentDraft: original.attachmentDraft, context: context)
                 guard proof.status == "verified" else { return nil }
-                let cleanState = try observation.startingCleanState()
                 guard let payload = original.payload else { throw WorkerProtocolError.malformedFrame }
-                _ = try dependencies.verifyReplyCleanState(payload.probeRequest(), cleanState, context.deadline)
+                _ = try dependencies.verifyReplyCleanState(payload.probeRequest(), preflight.cleanState, context.deadline)
                 var finalDB = try dependencies.makeChatDB(book)
                 guard try loadBoundReplyTarget(db: &finalDB, expected: original, input: input, highwater: highwater) != nil else {
                     throw ReplyTargetDrift()

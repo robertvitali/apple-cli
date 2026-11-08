@@ -296,7 +296,7 @@ struct ReplyDBProofTests {
         #expect(explicit.native_part == 4)
     }
 
-    @Test func replyHighwaterUsesSelectedChatMessageRowidsAndScanIsExclusiveOrderedAndOverflowAware() throws {
+    @Test func replyHighwaterIncludesAllMessagesAndChatScanIsExclusiveOrderedAndOverflowAware() throws {
         let fx = try replyFixture()
         try insertReplyResult(fx, rowid: 40, guid: "old-direct", text: "old", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
         try insertReplyResult(fx, rowid: 101, guid: "new-direct-a", text: "a", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
@@ -305,15 +305,16 @@ struct ReplyDBProofTests {
         var db = try makeDB(fx)
 
         let highwater = try db.exactReplyHighwater(chatRowid: 3)
-        #expect(highwater == 101)
-        try insertReplyResult(fx, rowid: 102, guid: "after-a", text: "after", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
-        try insertReplyResult(fx, rowid: 104, guid: "after-c", text: "after", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
-        try insertReplyResult(fx, rowid: 103, guid: "after-b", text: "after", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
+        #expect(highwater == 200)
+        try insertReplyResult(fx, rowid: 202, guid: "after-a", text: "after", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
+        try insertReplyResult(fx, rowid: 204, guid: "after-c", text: "after", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
+        try insertReplyResult(fx, rowid: 203, guid: "after-b", text: "after", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
+        try insertReplyResult(fx, rowid: 205, guid: "after-other-chat", text: "other", chatRowid: 1, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
         db = try makeDB(fx)
 
         let scan = try db.exactReplyRows(chatRowid: 3, afterHighwater: highwater)
         #expect(scan.overflow == false)
-        #expect(scan.rows.map(\.rowid) == [102, 103, 104])
+        #expect(scan.rows.map(\.rowid) == [202, 203, 204])
 
         for idx in 0..<129 {
             try insertReplyResult(fx, rowid: 300 + Int64(idx), guid: "overflow-\(idx)", text: "overflow", chatRowid: 3, parentGUID: "reply-root", parentPart: "2", isFromMe: 1)

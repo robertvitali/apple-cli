@@ -1575,12 +1575,8 @@ public struct ChatDB {
     func exactReplyHighwater(chatRowid: Int64) throws -> Int64 {
         guard chatRowid > 0 else { throw AppleError.validation("chatRowid must be > 0") }
         try validateExactReplyMembershipEvidence(chatRowid: chatRowid)
-        let rows = try reader.rows("""
-            SELECT COALESCE(MAX(m.ROWID), 0) AS max_rowid
-            FROM chat_message_join cmj
-            JOIN message m ON m.ROWID = cmj.message_id
-            WHERE cmj.chat_id = CAST(?1 AS INTEGER)
-            """, [String(chatRowid)])
+        // A previously stored message can acquire its chat membership after dispatch.
+        let rows = try reader.rows("SELECT COALESCE(MAX(ROWID), 0) AS max_rowid FROM message")
         guard let row = rows.first, case .integer(let highwater)? = row.values["max_rowid"] else {
             throw AppleError.upstream("Messages database reply highwater query returned an invalid rowid")
         }
