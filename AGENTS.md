@@ -237,18 +237,36 @@ protobuf; Messages needs fuzzy-match; SQLite is the system lib) means a coordina
 
 ## Toolchain + testing
 
-Swift 6. On a Command-Line-Tools-only Mac, use the swiftly toolchain (it bundles
-`swift-testing`; macOS XCTest needs full Xcode, which we avoid):
+Before pushing, validate the exact candidate commit. Choose tests by the systems
+affected by the complete change. For ordinary work and for minor or patch version
+bumps, run the affected systems’ Swift and CLI integration tests. Include relevant
+shared and cross-system tests when a changed dependency or contract affects their
+callers. For a minor or patch release, determine affected systems across the
+release since its previous tag. For documentation or tooling alone, run the checks
+that exercise those changes. Verify the selection ran the intended cases and
+record the systems, commands, results and any skips.
+
+**Messages-only example** (Swift 6, Command Line Tools Mac):
 
 ```sh
-(
-  export PATH="$HOME/.swiftly/bin:$PATH"
-  swift build --scratch-path .build-swiftly &&
-  swift test --scratch-path .build-swiftly
-) &&
+"$HOME/.swiftly/bin/swift" build --scratch-path .build-swiftly &&
+"$HOME/.swiftly/bin/swift" test --scratch-path .build-swiftly --filter 'MessagesKitTests|AmbientEnvironmentCanaryTests' &&
 /usr/bin/swift build &&
-env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" bats -r bats/
+env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" bats bats/hosted/messages.bats bats/local/messages.bats
 ```
+
+Keep the shared `AmbientEnvironmentCanaryTests` preflight for local Bats,
+including filtered runs. Stop before Bats if it fails. A change to shared EventKit
+behavior, for example, covers Calendar and Reminders.
+
+**An explicit major version bump requires all systems’ tests.** Run both builds,
+unfiltered `"$HOME/.swiftly/bin/swift" test --scratch-path .build-swiftly`, and
+recursive `env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" bats -r bats/` against
+the CLT build. Run the Python automation suite
+on its supported runners so platform-specific tests execute where applicable.
+Run live tests with their documented prerequisites and authorization. Record
+skips and their reasons. If required coverage is missing, major-bump validation
+is incomplete. Subsequent work on that major follows the affected-system rule.
 
 **Why `--scratch-path`:** `/usr/bin/swift` (Command Line Tools) and the swiftly toolchain are
 different Swift versions, and they cannot share a build cache — mixing them fails with
@@ -526,8 +544,7 @@ Fast-forward pushes are unaffected.
   step 20 and the `governance / required` check, and, being a pull-request rule, it constrains
   outside contributions rather than the operator's direct pushes, which required status checks
   gate.
-- Tests green before any push (both Swift toolchains plus `swift test` + `bats`; use the commands
-  in Toolchain + testing above).
+- Before any push, pass the checks selected under Toolchain + testing on the exact candidate commit.
 
 ## Output contract (agent-facing)
 
@@ -662,11 +679,10 @@ scratch directory, while running `release_artifact.py` against a real candidate 
 Mac is a native release build that needs the operator's grant (D23, D51), so its routine run is
 the hosted job (its own tests never run `swift` or build the product: they use a fake build, and
 one macOS-only class compiles tiny C programs).
-Prerequisites that carry over to every real path: clean `main`; the FULL local canonical suite
-(both Swift toolchains AND `bats -r bats/`, per Toolchain + testing) green on the EXACT
-candidate commit — the hosted gates run build, swift test and only a hosted-safe Bats partition,
-so the full bats tier is enforced locally and nowhere else; `[Unreleased]` accurately describes
-the batch (the rehearsal refuses an empty section); and a `git log <last-tag>..HEAD --format=%s`
+Every release path requires clean `main` and green checks on the exact candidate commit.
+Apply the version and system selection in Toolchain + testing. Hosted checks run a
+hosted-safe Bats partition. Also verify that `[Unreleased]` accurately describes
+the batch (the rehearsal refuses an empty section) and perform a `git log <last-tag>..HEAD --format=%s`
 review, since release notes and history are public surfaces. (The FIRST release — `v26.0.0` via
 the legacy workflow's `macos_major=26` input — was cut 2026-08-30 under D2; the next planned
 release is the macOS 27 adoption release `v27.0.0`, D18.)
@@ -678,7 +694,7 @@ the version-constant rewrite and the CHANGELOG heading move — content already 
 constituent commits landed. Treat it like a git
 auto-generated commit (merge/revert class): no reviewer fan-out and no trailers are expected
 on it. Note the CI/release jobs build with the hosted runner's single Xcode toolchain; the
-canonical two-toolchain suite (swiftly + CLT) remains the LOCAL pre-push gate.
+local pre-push gate follows Toolchain + testing for the release being prepared.
 
 ## Release notes — required contract
 

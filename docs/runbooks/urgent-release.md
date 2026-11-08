@@ -90,8 +90,8 @@ spell the version as the literal placeholder `X.Y.Z`; substitute it mechanically
 hand, for example `sed 's/X\.Y\.Z/26.0.1/g' block.sh > run.sh`.
 
 1. `main` is clean, and every hosted job of `ci.yml` and `docs.yml` passed on `C`.
-2. The full local canonical suite (both Swift toolchains and `bats -r bats/`, per `AGENTS.md`
-   "Toolchain + testing") and the Python automation tier are green on exactly `C`.
+2. On exactly `C`, pass the tests for the systems affected since the previous release tag.
+   Select them using [Toolchain + testing](../../AGENTS.md#toolchain--testing).
 3. `python3 scripts/check-release-notes.py` passes on `C`: `[Unreleased]` meets the release-notes
    contract in `AGENTS.md`, and it is the release note. A pass is not a privacy verdict; read the
    section against contract item 6 (no personal data) as well.
@@ -162,7 +162,7 @@ Stage by file path in both commits, never a directory or an all-files form.
    `git status --porcelain` then shows exactly these two files as modified. Commit them, and
    nothing else, as `chore(release): vX.Y.Z`. It is mechanical (`AGENTS.md` "Release-commit
    review posture").
-3. Re-run the full local canonical suite and the Python automation tier on the resulting tree.
+3. Re-run those affected-system tests and the CLI version checks on the release commit.
    The new version constant changes what `apple --version` and `apple version` report, so the
    green run on `C` does not carry over.
 4. Push both commits in one push, directly to `main`. A push runs each workflow from the pushed
