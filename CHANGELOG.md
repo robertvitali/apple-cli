@@ -30,8 +30,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 - Experimental [attachment retrieval](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/attachment/retrieve.md)
   requests native loading for an exact message and attachment part, with dry-run
   preview and verification of observed local availability. Uncertain outcomes
-  can leave a pending operation requiring inspection and recovery. Live retrieval
-  reliability has not yet been established.
+  can leave a pending operation requiring inspection and recovery. Before pressing,
+  the worker rechecks the transfer identity and state after reading the native
+  controls, then verifies the selected part still belongs to the transcript and
+  window. Live retrieval reliability has not yet been established.
 
 - Exact message get/history reads now expose strict native attachment transfer
   observations, including unknown and unavailable states. A finished native

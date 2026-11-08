@@ -111,12 +111,12 @@ struct MessagesEditEditorOwnership {
                       try panel.role(deadline: deadline) == "AXGroup" else {
                     throw MessagesAXNavigationError.targetDrift
                 }
-                try proveDescendant(route.selected, of: current, route: route, deadline: deadline)
+                try route.proveDescendant(route.selected, of: current, deadline: deadline)
                 let anchor = Anchor(container: current, panel: panel)
                 try validateAnchor(anchor, route: route, deadline: deadline)
                 return anchor
             }
-            try proveDescendant(current, of: parent, route: route, deadline: deadline)
+            try route.proveDescendant(current, of: parent, deadline: deadline)
             current = parent
         }
         throw MessagesAXNavigationError.traversalLimit
@@ -131,9 +131,9 @@ struct MessagesEditEditorOwnership {
               let panel = try route.transcript.parent(deadline: deadline), panel.sameIdentity(as: anchor.panel) else {
             throw MessagesAXNavigationError.targetDrift
         }
-        try proveDescendant(anchor.container, of: route.transcript, route: route, deadline: deadline)
-        try proveDescendant(route.transcript, of: anchor.panel, route: route, deadline: deadline)
-        try proveDescendant(anchor.panel, of: route.window, route: route, deadline: deadline)
+        try route.proveDescendant(anchor.container, of: route.transcript, deadline: deadline)
+        try route.proveDescendant(route.transcript, of: anchor.panel, deadline: deadline)
+        try route.proveDescendant(anchor.panel, of: route.window, deadline: deadline)
         // Selection may clear or its leaf disappear. Inspect every subtree,
         // exempting only the retained container and original selected identity.
         let containers = try route.transcript.children(limit: 256, deadline: deadline)
@@ -202,7 +202,7 @@ struct MessagesEditEditorOwnership {
             throw MessagesAXNavigationError.targetDrift
         }
         for node in [field, confirm, cancel] {
-            try proveDescendant(node, of: group, route: route, deadline: deadline)
+            try route.proveDescendant(node, of: group, deadline: deadline)
         }
         let drafts = try navigator.collect(from: route.window, window: route.window,
             traversalPolicy: .childrenOnly, deadline: deadline) { node, role, identifier in
@@ -223,35 +223,5 @@ struct MessagesEditEditorOwnership {
               current.confirm.sameIdentity(as: token.confirm), current.cancel.sameIdentity(as: token.cancel) else {
             throw MessagesAXNavigationError.targetDrift
         }
-    }
-
-    private func proveDescendant(_ node: any MessagesAXElement, of ancestor: any MessagesAXElement,
-                                 route: MessagesAXRoute, deadline: WorkerDeadline) throws {
-        var current = node
-        var seen: [any MessagesAXElement] = []
-        for _ in 0...32 {
-            try checkMessagesAXDeadline(deadline)
-            guard !seen.contains(where: { $0.sameIdentity(as: current) }),
-                  try current.processIdentifier(deadline: deadline) == route.process.identity.pid else {
-                throw MessagesAXNavigationError.targetDrift
-            }
-            // AXWindow describes an ancestor; a window need not expose it on itself.
-            if current.sameIdentity(as: route.window) {
-                guard current.sameIdentity(as: ancestor) else { throw MessagesAXNavigationError.targetDrift }
-                return
-            }
-            guard let window = try current.window(deadline: deadline), window.sameIdentity(as: route.window) else {
-                throw MessagesAXNavigationError.targetDrift
-            }
-            if current.sameIdentity(as: ancestor) { return }
-            seen.append(current)
-            guard let parent = try current.parent(deadline: deadline) else { throw MessagesAXNavigationError.targetDrift }
-            let children = try parent.children(limit: 256, deadline: deadline)
-            guard children.count <= 256, children.filter({ $0.sameIdentity(as: current) }).count == 1 else {
-                throw MessagesAXNavigationError.targetDrift
-            }
-            current = parent
-        }
-        throw MessagesAXNavigationError.traversalLimit
     }
 }

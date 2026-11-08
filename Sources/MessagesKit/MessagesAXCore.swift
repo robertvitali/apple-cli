@@ -181,6 +181,36 @@ struct MessagesAXRoute {
         self.transcript = transcript
         self.selected = selected
     }
+
+    func proveDescendant(_ node: any MessagesAXElement, of ancestor: any MessagesAXElement,
+                         deadline: WorkerDeadline) throws {
+        var current = node
+        var seen: [any MessagesAXElement] = []
+        for _ in 0...32 {
+            try checkMessagesAXDeadline(deadline)
+            guard !seen.contains(where: { $0.sameIdentity(as: current) }),
+                  try current.processIdentifier(deadline: deadline) == process.identity.pid else {
+                throw MessagesAXNavigationError.targetDrift
+            }
+            // AXWindow describes an ancestor; a window need not expose it on itself.
+            if current.sameIdentity(as: self.window) {
+                guard current.sameIdentity(as: ancestor) else { throw MessagesAXNavigationError.targetDrift }
+                return
+            }
+            guard let window = try current.window(deadline: deadline), window.sameIdentity(as: self.window) else {
+                throw MessagesAXNavigationError.targetDrift
+            }
+            if current.sameIdentity(as: ancestor) { return }
+            seen.append(current)
+            guard let parent = try current.parent(deadline: deadline) else { throw MessagesAXNavigationError.targetDrift }
+            let children = try parent.children(limit: 256, deadline: deadline)
+            guard children.count <= 256, children.filter({ $0.sameIdentity(as: current) }).count == 1 else {
+                throw MessagesAXNavigationError.targetDrift
+            }
+            current = parent
+        }
+        throw MessagesAXNavigationError.traversalLimit
+    }
 }
 
 enum MessagesAXRetainedRouteDiscovery {

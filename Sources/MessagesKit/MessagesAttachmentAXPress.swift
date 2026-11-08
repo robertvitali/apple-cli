@@ -25,10 +25,6 @@ struct MessagesAttachmentAXPress {
         let route = try navigator.captureInitialRoute(process: process, isTargetEligible: isTargetEligible, deadline: deadline)
         diagnostic?.record(.revalidation)
         guard try needsPress(validateTarget()) else { return }
-        diagnostic?.record(.route)
-        try navigator.revalidate(route, isTargetEligible: isTargetEligible, deadline: deadline)
-        diagnostic?.record(.frontmost)
-        guard try driver.messagesProcessIsFrontmost(process, deadline: deadline) else { throw MessagesAXNavigationError.targetDrift }
         diagnostic?.record(.enabled)
         guard try route.selected.enabled(deadline: deadline) == true else {
             throw Failure.pressUnavailable
@@ -37,6 +33,18 @@ struct MessagesAttachmentAXPress {
         guard try route.selected.actions(deadline: deadline).filter({ $0 == "AXPress" }).count == 1 else {
             throw Failure.pressUnavailable
         }
+        diagnostic?.record(.route)
+        try navigator.revalidate(route, isTargetEligible: isTargetEligible, deadline: deadline)
+        diagnostic?.record(.revalidation)
+        guard try needsPress(validateTarget()) else { return }
+        diagnostic?.record(.route)
+        // A scrolled-out balloon can still answer AXPress. Require each parent
+        // to list its child on the path from the selected part to this window.
+        guard !route.selected.sameIdentity(as: route.transcript) else { throw MessagesAXNavigationError.targetDrift }
+        try route.proveDescendant(route.transcript, of: route.window, deadline: deadline)
+        try route.proveDescendant(route.selected, of: route.transcript, deadline: deadline)
+        diagnostic?.record(.frontmost)
+        guard try driver.messagesProcessIsFrontmost(process, deadline: deadline) else { throw MessagesAXNavigationError.targetDrift }
         try checkMessagesAXDeadline(deadline)
         diagnostic?.record(.press)
         try route.selected.performAction(named: "AXPress", deadline: deadline)

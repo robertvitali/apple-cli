@@ -40,10 +40,36 @@ import Testing
         try MessagesAttachmentAXPress(driver: fx, isTargetEligible: fx.eligible).perform(
             messageGUID: "synthetic-message", nativePartIndex: 0, nativePartGUID: nil,
             deadline: .millisecondsFromNow(5000), validateTarget: { validations += 1; return .pending })
-        #expect(validations == 2)
+        #expect(validations == 3)
         #expect(fx.message.performed == ["AXPress"])
     }
-    @Test func replacementBeforePressIsRefused() throws {
+    @Test(arguments: ["row-removed", "link-only-row", "transcript-removed", "wrong-parent", "duplicate-child"])
+    func targetMustRemainInTranscriptThroughFinalActionRead(_ drift: String) throws {
+        let fx = AttachmentPressFixture()
+        fx.message.onActionsRead = {
+            switch drift {
+            case "row-removed":
+                fx.transcript.childrenNodes = []
+            case "link-only-row":
+                fx.transcript.childrenNodes = []
+                fx.transcript.linkedNodes = [fx.message]
+            case "transcript-removed":
+                fx.window.childrenNodes = []
+            case "wrong-parent":
+                fx.message.parentNode = fx.window
+            default:
+                fx.transcript.childrenNodes = [fx.message, fx.message]
+            }
+        }
+        #expect(throws: MessagesAXNavigationError.targetDrift) {
+            try MessagesAttachmentAXPress(driver: fx, isTargetEligible: fx.eligible).perform(
+                messageGUID: "synthetic-message", nativePartIndex: 1, nativePartGUID: nil,
+                deadline: .millisecondsFromNow(5000), validateTarget: { .pending })
+        }
+        #expect(fx.message.performed.isEmpty)
+    }
+
+    @Test(arguments: [2, 3]) func replacementBeforePressIsRefused(_ changeAt: Int) throws {
         let fx = AttachmentPressFixture()
         var validations = 0
         #expect(throws: MessagesAXNavigationError.targetDrift) {
@@ -51,7 +77,7 @@ import Testing
                 messageGUID: "synthetic-message", nativePartIndex: 0, nativePartGUID: nil,
                 deadline: .millisecondsFromNow(5000), validateTarget: {
                     validations += 1
-                    if validations == 2 { fx.transcript.childrenNodes = [fx.message.clone()] }
+                    if validations == changeAt { fx.transcript.childrenNodes = [fx.message.clone()] }
                     return .pending
                 })
         }
@@ -67,7 +93,7 @@ import Testing
         }
         #expect(fx.message.performed.isEmpty)
     }
-    @Test(arguments: [1, 2]) func downloadedObservationSkipsPress(_ changeAt: Int) throws {
+    @Test(arguments: [1, 2, 3]) func downloadedObservationSkipsPress(_ changeAt: Int) throws {
         let fx = AttachmentPressFixture()
         var checks = 0
         try MessagesAttachmentAXPress(driver: fx, isTargetEligible: fx.eligible).perform(
@@ -80,7 +106,7 @@ import Testing
         #expect(fx.message.performed.isEmpty)
     }
 
-    @Test(arguments: [1, 2], [MessagesAttachmentRetrievalState.Outcome.failed, .unavailable])
+    @Test(arguments: [1, 2, 3], [MessagesAttachmentRetrievalState.Outcome.failed, .unavailable])
     func uncertainObservationRefusesPress(_ changeAt: Int, _ outcome: MessagesAttachmentRetrievalState.Outcome) throws {
         let fx = AttachmentPressFixture()
         var checks = 0
@@ -112,6 +138,8 @@ private final class AttachmentPressFixture: MessagesReactionAXDriving {
         window.pid = processIdentity.pid
         transcript.pid = processIdentity.pid
         message.pid = processIdentity.pid
+        transcript.parentNode = window
+        message.parentNode = transcript
         transcript.owner = window
         message.owner = window
         root.childrenNodes = [window]
@@ -163,6 +191,8 @@ private final class AttachmentPressFixture: MessagesReactionAXDriving {
 
 private final class AttachmentPressNode: MessagesAXElement {
     var performed: [String] = []
+    var onEnabledRead: (() throws -> Void)?
+    var onActionsRead: (() throws -> Void)?
     var onPerform: (() throws -> Void)?
     var pressActions = ["AXPress"]
     var identity = UUID()
@@ -222,7 +252,10 @@ private final class AttachmentPressNode: MessagesAXElement {
     func subrole(deadline: WorkerDeadline) throws -> String? { subroleName }
     func mainWindow(deadline: WorkerDeadline) throws -> Bool? { mainValue }
     func focused(deadline: WorkerDeadline) throws -> Bool? { focusValue }
-    func enabled(deadline: WorkerDeadline) throws -> Bool? { true }
+    func enabled(deadline: WorkerDeadline) throws -> Bool? {
+        try onEnabledRead?()
+        return true
+    }
     func selected(deadline: WorkerDeadline) throws -> Bool? { try checkMessagesAXDeadline(deadline); return isSelected }
     func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
         try checkMessagesAXDeadline(deadline)
@@ -237,7 +270,10 @@ private final class AttachmentPressNode: MessagesAXElement {
     func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { parentNode }
     func processIdentifier(deadline: WorkerDeadline) throws -> Int32? { try checkMessagesAXDeadline(deadline); return pid }
     func valueSettable(deadline: WorkerDeadline) throws -> Bool? { nil }
-    func actions(deadline: WorkerDeadline) throws -> [String] { pressActions }
+    func actions(deadline: WorkerDeadline) throws -> [String] {
+        try onActionsRead?()
+        return pressActions
+    }
     func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         try checkMessagesAXDeadline(deadline)
         return childrenNodes
@@ -262,15 +298,19 @@ private final class AttachmentPressNode: MessagesAXElement {
 
 
 @Suite struct MessagesAttachmentPendingWorkerRegressionTests {
-    private func fixture() throws -> ChatFixture {
-        let fx = try ChatFixture()
+    private func attachmentBody(guid: String) -> Data {
         let body = NSMutableAttributedString(string: "apple-cli-test \u{fffc}")
         let range = NSRange(location: body.length - 1, length: 1)
         body.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 1),
                           range: NSRange(location: 0, length: range.location))
         body.addAttribute(NSAttributedString.Key("__kIMMessagePartAttributeName"), value: NSNumber(value: 0), range: range)
-        body.addAttribute(NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"), value: "a10", range: range)
-        try fx.insertMessage(rowid: 60, guid: "synthetic-pending", attributedBody: NSArchiver.archivedData(withRootObject: body),
+        body.addAttribute(NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"), value: guid, range: range)
+        return NSArchiver.archivedData(withRootObject: body)
+    }
+
+    private func fixture() throws -> ChatFixture {
+        let fx = try ChatFixture()
+        try fx.insertMessage(rowid: 60, guid: "synthetic-pending", attributedBody: attachmentBody(guid: "a10"),
                              chatRowid: 3, date: fx.base, cacheHasAttachments: true)
         try fx.exec("INSERT INTO message_attachment_join VALUES(60,10); ALTER TABLE attachment ADD COLUMN transfer_state; UPDATE attachment SET transfer_state=4")
         return fx
@@ -360,6 +400,46 @@ private final class AttachmentPressNode: MessagesAXElement {
         #expect(changes == 1)
         #expect(result.category == .failed)
         #expect(driver.message.performed == (afterPress ? ["AXPress"] : []))
+    }
+
+    private enum TransferChangePoint: CaseIterable { case enabled, routeAction }
+
+    @Test(arguments: [false, true], TransferChangePoint.allCases)
+    private func transferChangeWhileReadingPressControlsSkipsPress(_ completed: Bool, at point: TransferChangePoint) throws {
+        let fx = try fixture(), driver = AttachmentPressFixture()
+        var changed = false
+        let changeTransfer = {
+            guard !changed else { return }
+            changed = true
+            if completed {
+                try fx.exec("UPDATE attachment SET transfer_state=5 WHERE ROWID=10")
+            } else {
+                let hex = self.attachmentBody(guid: "replacement-guid").map { String(format: "%02x", $0) }.joined()
+                try fx.exec("""
+                    BEGIN;
+                    UPDATE message SET attributedBody=X'\(hex)' WHERE ROWID=60;
+                    UPDATE attachment SET guid='replacement-guid' WHERE ROWID=10;
+                    COMMIT;
+                    """)
+            }
+        }
+        switch point {
+        case .enabled:
+            driver.message.onEnabledRead = changeTransfer
+        case .routeAction:
+            driver.message.onEnabledRead = { [weak message = driver.message] in
+                var actionReads = 0
+                message?.onActionsRead = {
+                    actionReads += 1
+                    // The direct AXPress lookup precedes the route's eligibility lookup.
+                    if actionReads == 2 { try changeTransfer() }
+                }
+            }
+        }
+        let result = try run(fx, driver: driver)
+        #expect(changed)
+        #expect(driver.message.performed.isEmpty)
+        #expect(result.category == (completed ? .ack : .failed))
     }
 
     @Test func pendingWorkerPressesExactlyOnceAndVerifiesAvailability() throws {
