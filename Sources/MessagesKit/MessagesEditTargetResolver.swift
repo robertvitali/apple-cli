@@ -94,7 +94,7 @@ enum MessagesEditTargetResolver {
             let decoded = NativeMessageParts.decode(blob, requireExactText: true)
             guard decoded.nativePartsAvailable, let parts = decoded.nativeParts, let fullText = decoded.text,
                   let part = parts.first(where: { $0.index == partIndex }), part.attachmentGUID == nil,
-                  part.utf16Ranges.count == 1, let nativeRange = part.utf16Ranges.first,
+                  let nativeRange = NativeMessageParts.singleActionRange(for: part, among: parts, text: fullText),
                   let range = Range(NSRange(location: nativeRange.location, length: nativeRange.length), in: fullText) else { throw Failure.invalidTarget }
             switch row.values["text_type"] {
             case .text("null"): break

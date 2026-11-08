@@ -1,3 +1,4 @@
+import ArgumentParser
 import AppleKit
 import Foundation
 import Testing
@@ -76,6 +77,43 @@ import Testing
         #expect(try !request.matches(duplicate))
         try fx.exec("DELETE FROM chat_message_join WHERE message_id=60; DELETE FROM message WHERE ROWID=60")
         #expect(throws: (any Error).self) { try read(fx) }
+    }
+
+    @Test(arguments: [
+        ([nil, 0], 0, false), ([nil, 2], 2, true),
+        ([0, 1, 0], 0, false), ([0, 1, 0], 1, true),
+        ([2, 1, 2], 2, false), ([2, 1, 2], 1, true)
+    ] as [([Int?], Int, Bool)])
+    func editRequiresOneNativeTarget(_ indices: [Int?], _ selected: Int, _ eligible: Bool) throws {
+        let fx = try fixture()
+        let segment = "apple-cli-test duplicate"
+        let value = NSMutableAttributedString(string: "")
+        let partKey = NSAttributedString.Key("__kIMMessagePartAttributeName")
+        for index in indices {
+            let attributes = index.map { [partKey: NSNumber(value: $0)] } ?? [:]
+            value.append(NSAttributedString(string: segment, attributes: attributes))
+        }
+        let hex = NSArchiver.archivedData(withRootObject: value).map { String(format: "%02x", $0) }.joined()
+        try fx.exec("UPDATE message SET attributedBody=X'\(hex)' WHERE ROWID=60")
+        let args = try MessagesEdit.parse(["--chat-rowid", "3", "--message-rowid", "60",
+            "--part-index", String(selected), "--replacement-text", "apple-cli-test replacement"])
+        let gate = MessagesWriteGuard.Gate(willExecute: false, sandboxActive: true, allowedRecipients: ["+12125550100"])
+        let now = Date(timeIntervalSinceReferenceDate: Double(fx.base / 1_000_000_000 + 2))
+        if eligible {
+            let result = try args.resolve(databasePath: fx.path, gate: gate, now: now)
+            #expect(result.snapshot.partText == segment)
+            #expect(result.request.nativePartIndex == selected)
+        } else {
+            #expect(throws: MessagesEditTargetResolver.Failure.invalidTarget) {
+                try MessagesEditTargetResolver.read(databasePath: fx.path, chat: .rowid(3), message: .rowid(60),
+                    partIndex: selected, sandboxPrefix: "apple-cli-test", deadline: .millisecondsFromNow(5000))
+            }
+            #expect {
+                try args.resolve(databasePath: fx.path, gate: gate, now: now)
+            } throws: { error in
+                (error as? AppleError)?.message == "edit target must identify a valid own sent native text part"
+            }
+        }
     }
 
     @Test func workerBaselineBindsParticipantsAlongsideBodyAndIdentity() throws {

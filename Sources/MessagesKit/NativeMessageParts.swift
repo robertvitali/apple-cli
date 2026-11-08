@@ -29,6 +29,25 @@ public enum NativeMessageParts {
         }
     }
 
+    /// Checks decoded body ranges before addressing a native action by part index.
+    /// Separate ranges can share the same native part GUID. Unindexed runs can
+    /// also receive index zero even though read results omit them from the map.
+    static func singleActionRange(for part: NativePart, among parts: [NativePart],
+                                  text: String) -> UTF16Range? {
+        guard part.utf16Ranges.count == 1, let range = part.utf16Ranges.first else { return nil }
+        if part.index == 0 {
+            var remaining = text.utf16.count
+            for mappedPart in parts {
+                for span in mappedPart.utf16Ranges {
+                    guard span.length > 0, span.length <= remaining else { return nil }
+                    remaining -= span.length
+                }
+            }
+            guard remaining == 0 else { return nil }
+        }
+        return range
+    }
+
     public struct Mention: Equatable, Sendable {
         public let identifier: String
         public let utf16Range: UTF16Range
