@@ -2052,7 +2052,7 @@ public struct ChatDB {
         if case .guid(let guid) = messageSelector, !safeReactionTargetGUID(guid) {
             throw AppleError.validation("reaction message GUID is empty or contains unsafe controls")
         }
-        let (chat, message) = try exactGet(chat: selector, message: messageSelector)
+        let (chat, message) = try exactGet(chat: selector, message: messageSelector, forNativeAction: true)
         let chatTarget = ExactReactionChatTarget(rowid: chat.rowid, guid: chat.guid)
         let messageTarget = ExactReactionMessageTarget(rowid: message.rowid, guid: message.message_guid)
         var unknownReasons: [String] = []
@@ -2104,7 +2104,7 @@ public struct ChatDB {
             )
         }
 
-        let aliases = reactionAliases(messageGUID: messageGUID, parts: reactionAliasParts(message, selected: provenPart))
+        let aliases = Self.reactionAliases(messageGUID: messageGUID, parts: reactionAliasParts(message, selected: provenPart))
         let rows = try reactionRows(chatRowid: chat.rowid, aliases: aliases.all, rowLimit: rowLimit,
                                     hasCustomEmoji: reactionSchema.hasCustomEmoji)
         var capped = false
@@ -2342,27 +2342,17 @@ public struct ChatDB {
 
     private func resolveExactReactionPart(_ message: ExactMessage, requested: Int?,
                                           unknownReasons: inout [String]) throws -> Int? {
-        if let requested {
-            guard requested >= 0 else { throw AppleError.validation("partIndex must be >= 0") }
-            if message.native_parts_available,
-               let parts = message.native_parts,
-               parts.contains(where: { $0.index == requested }) {
-                return requested
-            }
+        if let requested, requested < 0 { throw AppleError.validation("partIndex must be >= 0") }
+        if let part = message.uniqueNativeActionPart(requested: requested) { return part.index }
+        if requested != nil {
             unknownReasons.append("part-not-proven")
-            return nil
-        }
-        guard message.native_parts_available, let parts = message.native_parts else {
+        } else if !message.native_parts_available {
             unknownReasons.append("native-parts-unavailable:\(message.native_parts_reason)")
-            return nil
+        } else if let parts = message.native_parts, !parts.isEmpty {
+            unknownReasons.append(parts.count > 1 ? "multiple-native-parts-require-explicit-part" : "part-not-proven")
+        } else {
+            unknownReasons.append("empty-native-parts")
         }
-        let indexes = Set(parts.map(\.index))
-        if indexes.count == 1 { return indexes.first }
-        if indexes.count > 1 {
-            unknownReasons.append("multiple-native-parts-require-explicit-part")
-            return nil
-        }
-        unknownReasons.append("empty-native-parts")
         return nil
     }
 
@@ -2372,7 +2362,7 @@ public struct ChatDB {
         return Array(Set(parts.map(\.index))).sorted()
     }
 
-    private func reactionAliases(messageGUID: String, parts: [Int]) -> (selected: Set<String>, bare: Set<String>, all: [String]) {
+    static func reactionAliases(messageGUID: String, parts: [Int]) -> (selected: Set<String>, bare: Set<String>, all: [String]) {
         let bare = Set([messageGUID, "bp:\(messageGUID)"])
         var selected = bare
         for part in parts {
@@ -2382,7 +2372,7 @@ public struct ChatDB {
         return (selected, bare, Array(selected).sorted())
     }
 
-    private func reactionAliasesHaveSingleOwner(_ aliases: [String], messageRowid: Int64) throws -> Bool {
+    static func reactionAliasOwnerCandidates(_ aliases: [String]) -> [String] {
         // Invert EVERY accepted alias form: H, bp:H, p:N/H, p:N/bp:H.
         // A literal-GUID uniqueness check misses G versus bp:G, and checking only
         // those two misses a message whose literal GUID is p:N/G. Check globally,
@@ -2400,7 +2390,11 @@ public struct ChatDB {
                 }
             }
         }
-        let candidates = owners.sorted()
+        return owners.sorted()
+    }
+
+    private func reactionAliasesHaveSingleOwner(_ aliases: [String], messageRowid: Int64) throws -> Bool {
+        let candidates = Self.reactionAliasOwnerCandidates(aliases)
         let placeholders = candidates.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
         let rows = try reader.rows("""
             SELECT ROWID AS rowid FROM message

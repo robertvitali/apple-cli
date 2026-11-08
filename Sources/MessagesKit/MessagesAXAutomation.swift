@@ -306,14 +306,17 @@ struct MessagesReactionAXAutomation {
     let maxTraversalNodes: Int
     let maxTraversalDepth: Int
     let maxChildren: Int
+    private let validateTarget: (WorkerDeadline) throws -> Void
     private let readinessNow: () -> UInt64
     private let readinessPause: (UInt64) -> Void
 
     init(driver: any MessagesReactionAXDriving = LiveMessagesReactionAXDriver(),
+         validateTarget: @escaping (WorkerDeadline) throws -> Void = { _ in },
          maxTraversalNodes: Int = 2_048, maxTraversalDepth: Int = 32, maxChildren: Int = 256,
          readinessNow: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
          readinessPause: @escaping (UInt64) -> Void = { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) }) {
         self.driver = driver
+        self.validateTarget = validateTarget
         self.maxTraversalNodes = maxTraversalNodes
         self.maxTraversalDepth = maxTraversalDepth
         self.maxChildren = maxChildren
@@ -436,9 +439,11 @@ struct MessagesReactionAXAutomation {
                                                           nativePartIndex: request.nativePartIndex,
                                                           nativePartGUID: request.nativePartGUID)
             stage = .open
+            try validateTarget(deadline)
             let process = try driver.openMessages(url: targetURL, deadline: deadline)
             stage = .initialRoute
             let route = try captureInitialRoute(process: process, titles: titles, deadline: deadline)
+            try validateTarget(deadline)
             try revalidate(route, titles: titles, deadline: deadline)
             guard let action = try reactAction(on: route.selected, titles: titles, deadline: deadline) else {
                 throw MessagesReactionAXError.targetDrift
@@ -488,6 +493,7 @@ struct MessagesReactionAXAutomation {
                                              deadline: deadline)
             // Last route validation is after picker traversal as well. Public AX is
             // not atomic: external UI interference remains an experimental limitation.
+            try validateTarget(deadline)
             _ = try validatePostMenuPicker(route: route, titles: titles, picker: picker, button: button,
                                            initialSelected: initialSelected,
                                            identifier: request.reaction.pickerIdentifier,
@@ -756,6 +762,7 @@ struct MessagesReactionAXAutomation {
         do {
             _ = try waitForRetainedRouteAfterPickerDismissal(process: originalRoute.process, titles: titles,
                                                              originalRoute: originalRoute, deadline: deadline)
+            try validateTarget(deadline)
             route = try requireRetainedRouteAfterPickerDismissal(process: originalRoute.process, titles: titles,
                                                                  originalRoute: originalRoute, deadline: deadline)
         } catch let error as MessagesTargetDrift {
@@ -809,6 +816,7 @@ struct MessagesReactionAXAutomation {
 
     private func cancelOwnedPicker(route: Route, titles: [String], picker: any MessagesAXElement,
                                    experimentalUIHandoff: Bool, deadline: WorkerDeadline) throws {
+        try validateTarget(deadline)
         let window: any MessagesAXElement
         if experimentalUIHandoff {
             do {
@@ -1230,6 +1238,7 @@ struct MessagesReactionAXAutomation {
         }) else {
             throw CustomChooserReactionUnavailable(phase: .preexistingCheck)
         }
+        try validateTarget(deadline)
         try withCustomChooserAXFailure(.launchRevalidation) {
             try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: deadline)
             guard try uniquePicker(in: route.window, deadline: deadline).sameIdentity(as: picker),
@@ -1265,6 +1274,7 @@ struct MessagesReactionAXAutomation {
         let workDeadline = WorkerDeadline.millisecondsFromNow((deadline.remainingNanoseconds - reserve) / 1_000_000)
         var selectionStarted = false
         do {
+            try validateTarget(workDeadline)
             try withCustomChooserAXFailure(.candidateWait) {
                 try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: workDeadline)
                 try validateChooserOwnership(route: route, picker: picker, popover: popover, search: search,
@@ -1319,6 +1329,7 @@ struct MessagesReactionAXAutomation {
                 // Cleanup is best effort; any failure preserves the original
                 // refusal and the parent operation's uncertain state.
                 do {
+                    try validateTarget(deadline)
                     try validateChooserOwnership(route: route, picker: picker, popover: popover, search: search,
                                                  expectedQuery: query, phase: .candidateWait, deadline: deadline)
                     try search.setValue("", deadline: deadline)
@@ -1369,6 +1380,7 @@ struct MessagesReactionAXAutomation {
         for index in keys.indices {
             let key = keys[index]
             if key == .returnKey { try customChooserPause(100_000_000, deadline: deadline) }
+            try validateTarget(deadline)
             try validateCustomEmojiSelectionKeyPreconditions(route: route, titles: titles, picker: picker,
                                                              popover: popover, search: search, candidate: candidate,
                                                              emoji: emoji, expectedQuery: plan.query,

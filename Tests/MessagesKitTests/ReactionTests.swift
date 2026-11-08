@@ -56,6 +56,29 @@ struct ExactReactionInspectTests {
                    homeDirectoryForTilde: fx.homePath)
     }
 
+    @Test(arguments: [
+        ([nil, 0], nil, false), ([nil, 0], 0, false),
+        ([nil, 2], nil, false), ([nil, 2], 2, true),
+        ([0, 1, 0], 0, false), ([0, 1, 0], 1, true),
+        ([2, 1, 2], 2, false), ([0, 1], 0, true), ([2], nil, true)
+    ] as [([Int?], Int?, Bool)])
+    func reactionEligibilityRequiresOneNativeActionTarget(_ indices: [Int?], _ selected: Int?, _ eligible: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        let body = NSMutableAttributedString(string: "")
+        for index in indices {
+            let attributes = index.map { [reactionPartKey: NSNumber(value: $0)] } ?? [:]
+            body.append(NSAttributedString(string: "same", attributes: attributes))
+        }
+        try fx.insertMessage(rowid: 70, guid: "synthetic-reaction-part", text: "same",
+                             attributedBody: NSArchiver.archivedData(withRootObject: body), chatRowid: 3, date: fx.base)
+        var db = try makeDB(fx)
+        let result = try db.exactReactionInspect(chat: .rowid(3), message: .rowid(70), partIndex: selected)
+        #expect(result.target.mutation_eligible == eligible)
+        #expect(result.target.part_index == (eligible ? (selected ?? 2) : nil))
+        #expect(result.current_outgoing.status == (eligible ? "absent" : "unknown"))
+    }
+
     @Test func missingReactionColumnsReportsUnavailable() throws {
         let fx = try ChatFixture()
         var db = try makeDB(fx)
@@ -72,7 +95,7 @@ struct ExactReactionInspectTests {
         let fx = try ChatFixture()
         try fx.addReactionColumns()
         let text = "left right"
-        let body = reactionNativeArchive(text, parts: [(2, reactionRange(text, "right"))])
+        let body = reactionNativeArchive(text, parts: [(2, NSRange(location: 0, length: text.utf16.count))])
         try fx.insertMessage(rowid: 70, guid: "target-guid", text: text, attributedBody: body,
                              chatRowid: 3, date: fx.base + 10)
         try fx.insertReaction(rowid: 100, guid: "reaction-heart", associatedGUID: "p:2/target-guid",
@@ -144,7 +167,7 @@ struct ExactReactionInspectTests {
         let text = "left right"
         let parts = multipart
             ? [(1, reactionRange(text, "left")), (2, reactionRange(text, "right"))]
-            : [(2, reactionRange(text, "right"))]
+            : [(2, NSRange(location: 0, length: text.utf16.count))]
         try fx.insertMessage(rowid: 70, guid: guid, text: text,
                              attributedBody: reactionNativeArchive(text, parts: parts),
                              chatRowid: 3, date: fx.base)

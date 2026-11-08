@@ -74,11 +74,10 @@ private func reactionTargetingLimitation(_ experimentalUIHandoff: Bool) -> Strin
 }
 
 private struct ReactionResolvedTarget {
+    let requestedPartIndex: Int?
     let inspect: ChatDB.ExactReactionInspect
-    let message: ChatDB.ExactMessage
     let reaction: MessagesReaction?
     let reactionKey: String?
-    let nativePartGUID: String?
     let workerPayload: MessagesReactionWorkerPayload?
     let workerCommand: WorkerCommand
     let binding: WorkerObservedTargetBinding
@@ -350,7 +349,7 @@ private func sameReactionValue(_ lhs: MessagesReaction, _ rhs: MessagesReaction)
     }
 }
 
-private func resolveReactionTarget(db: inout ChatDB, options: any ReactionWriteOptions,
+private func resolveReactionTarget(db: inout ChatDB, gate: MessagesWriteGuard.Gate, options: any ReactionWriteOptions,
                                    operation: ReactionMutation) throws -> ReactionResolvedTarget {
     let inspect = try db.exactReactionInspect(chat: options.chatSelector(),
                                               message: options.messageSelector(),
@@ -364,7 +363,9 @@ private func resolveReactionTarget(db: inout ChatDB, options: any ReactionWriteO
         throw AppleError.validation("message reaction target lacks required native identity")
     }
     let (_, message) = try db.exactGet(chat: .rowid(inspect.target.chat_rowid),
-                                       message: .rowid(inspect.target.message_rowid))
+                                       message: .rowid(inspect.target.message_rowid), forNativeAction: true)
+    let evidence = try reactionTargetEvidence(message: message, db: db, gate: gate, requested: options.partIndex,
+                                              partIndex: nativePartIndex)
     let (reaction, reactionKey) = try parseRequestedReaction(options, current: inspect.current_outgoing,
                                                              operation: operation)
     let nativePartGUID = "p:\(nativePartIndex)/\(messageGUID)"
@@ -375,7 +376,7 @@ private func resolveReactionTarget(db: inout ChatDB, options: any ReactionWriteO
             messageGUID: messageGUID,
             nativePartIndex: nativePartIndex,
             nativePartGUID: nativePartGUID,
-            reaction: reaction,
+            reaction: reaction, evidence: evidence,
             experimentalUIHandoff: options.experimentalUIHandoff
         )
     }
@@ -390,11 +391,10 @@ private func resolveReactionTarget(db: inout ChatDB, options: any ReactionWriteO
                                targetLength: rawTarget.utf8.count)
     )
     return ReactionResolvedTarget(
+        requestedPartIndex: options.partIndex,
         inspect: inspect,
-        message: message,
         reaction: reaction,
         reactionKey: reactionKey,
-        nativePartGUID: nativePartGUID,
         workerPayload: payload,
         workerCommand: try payload.map { payload in
             try WorkerCommand(name: operation == .set ? "messages.reaction.set" : "messages.reaction.remove",
@@ -405,17 +405,30 @@ private func resolveReactionTarget(db: inout ChatDB, options: any ReactionWriteO
     )
 }
 
-private func validateReactionSandbox(target: ReactionResolvedTarget, db: ChatDB,
-                                     gate: MessagesWriteGuard.Gate) throws {
-    let body = target.message.body ?? ""
+private func reactionTargetEvidence(message: ChatDB.ExactMessage, db: ChatDB, gate: MessagesWriteGuard.Gate,
+                                    requested: Int?, partIndex: Int) throws -> MessagesReactionTargetEvidence {
+    let participant = try reactionSandboxParticipant(message: message, db: db, gate: gate)
+    guard let part = message.uniqueNativeActionPart(requested: requested), part.index == partIndex else {
+        throw ReactionTargetDrift()
+    }
+    return MessagesReactionTargetEvidence(chatRowID: message.selected_chat_rowid, messageRowID: message.rowid,
+        fromMe: message.is_from_me, explicitPart: requested != nil,
+        attachmentGUIDBytes: part.attachmentGUID.map { Data($0.utf8) },
+        bodyDigest: message.body.map { MessagesReactionTargetEvidence.digest(Data($0.utf8)) },
+        sandboxParticipant: participant.map { Data($0.utf8) })
+}
+
+private func reactionSandboxParticipant(message: ChatDB.ExactMessage, db: ChatDB,
+                                        gate: MessagesWriteGuard.Gate) throws -> String? {
+    let body = message.body ?? ""
     if gate.sandboxActive, !body.hasPrefix(gate.sandboxPrefix) {
         throw AppleError.safetyViolation("refusing reaction mutation: target message is not labeled \(gate.sandboxPrefix)", sandbox: true)
     }
-    guard gate.sandboxActive else { return }
-    guard target.message.hasDirectChatStyle else {
+    guard gate.sandboxActive else { return nil }
+    guard message.hasDirectChatStyle else {
         throw AppleError.safetyViolation("refusing reaction mutation: sandbox requires a known direct conversation", sandbox: true)
     }
-    let participants = try db.exactParticipantHandles(chatRowid: target.inspect.target.chat_rowid)
+    let participants = try db.exactParticipantHandles(chatRowid: message.selected_chat_rowid)
     if participants.count != 1 {
         throw AppleError.safetyViolation("refusing reaction mutation: sandbox requires exactly one allowed participant", sandbox: true)
     }
@@ -423,6 +436,7 @@ private func validateReactionSandbox(target: ReactionResolvedTarget, db: ChatDB,
           Send.isAllowlisted(only, among: gate.allowedRecipients) else {
         throw AppleError.safetyViolation("refusing reaction mutation: selected conversation is not the single allowed sandbox recipient", sandbox: true)
     }
+    return only
 }
 
 
@@ -439,6 +453,7 @@ private func sameReactionWorkerCommand(_ lhs: WorkerCommand, _ rhs: WorkerComman
         && left.nativePartIndex == right.nativePartIndex
         && byteEqual(left.nativePartGUID, right.nativePartGUID)
         && sameReactionValue(left.reaction, right.reaction)
+        && left.evidence == right.evidence
         && left.experimentalUIHandoff == right.experimentalUIHandoff
 }
 
@@ -461,28 +476,19 @@ private func exactReactionIdentityMatches(_ fresh: ChatDB.ExactReactionInspect,
         && fresh.target.mutation_eligible
 }
 
-private func loadBoundReactionInspect(db: inout ChatDB, expected: ReactionResolvedTarget) throws -> ChatDB.ExactReactionInspect? {
+private func loadBoundReactionInspect(db: inout ChatDB, expected: ReactionResolvedTarget, gate: MessagesWriteGuard.Gate) throws -> ChatDB.ExactReactionInspect? {
     let fresh = try db.exactReactionInspect(chat: .rowid(expected.inspect.target.chat_rowid),
                                             message: .rowid(expected.inspect.target.message_rowid),
-                                            partIndex: expected.inspect.target.part_index,
+                                            partIndex: expected.requestedPartIndex,
                                             rowLimit: reactionRowLimit)
     guard exactReactionIdentityMatches(fresh, expected) else { return nil }
+    let (_, message) = try db.exactGet(chat: .rowid(fresh.target.chat_rowid), message: .rowid(fresh.target.message_rowid),
+                                       forNativeAction: true)
+    guard let index = fresh.target.part_index else { return nil }
+    let evidence = try reactionTargetEvidence(message: message, db: db, gate: gate,
+                                             requested: expected.requestedPartIndex, partIndex: index)
+    guard expected.workerPayload?.evidence == evidence else { return nil }
     return fresh
-}
-
-private func loadBoundReactionTarget(db: inout ChatDB, expected: ReactionResolvedTarget) throws -> ReactionResolvedTarget? {
-    guard let fresh = try loadBoundReactionInspect(db: &db, expected: expected) else { return nil }
-    let (_, message) = try db.exactGet(chat: .rowid(expected.inspect.target.chat_rowid),
-                                       message: .rowid(expected.inspect.target.message_rowid))
-    return ReactionResolvedTarget(inspect: fresh,
-                                  message: message,
-                                  reaction: expected.reaction,
-                                  reactionKey: expected.reactionKey,
-                                  nativePartGUID: expected.nativePartGUID,
-                                  workerPayload: expected.workerPayload,
-                                  workerCommand: expected.workerCommand,
-                                  binding: expected.binding,
-                                  experimentalUIHandoff: expected.experimentalUIHandoff)
 }
 
 private func desiredReactionText(_ key: String?) -> String { key ?? "absent" }
@@ -510,8 +516,7 @@ private func runReactionMutation(global: GlobalOptions, dependencies: MessagesCo
         let gate = try dependencies.resolveGate(global)
         let book = dependencies.loadAddressBook()
         var previewDB = try dependencies.makeChatDB(book)
-        let previewTarget = try resolveReactionTarget(db: &previewDB, options: options, operation: operation)
-        try validateReactionSandbox(target: previewTarget, db: previewDB, gate: gate)
+        let previewTarget = try resolveReactionTarget(db: &previewDB, gate: gate, options: options, operation: operation)
 
         guard gate.willExecute else {
             let data = ReactionPreview(action: "reaction-\(operation.rawValue)",
@@ -537,8 +542,7 @@ private func runReactionMutation(global: GlobalOptions, dependencies: MessagesCo
             deadline: .millisecondsFromNow(30_000),
             resolve: {
                 var db = try dependencies.makeChatDB(book)
-                let resolved = try resolveReactionTarget(db: &db, options: options, operation: operation)
-                try validateReactionSandbox(target: resolved, db: db, gate: gate)
+                let resolved = try resolveReactionTarget(db: &db, gate: gate, options: options, operation: operation)
                 if case .custom = resolved.reaction,
                    operation == .remove && options.emoji == nil {
                     throw ReactionCustomExecutionUnsupported()
@@ -549,10 +553,9 @@ private func runReactionMutation(global: GlobalOptions, dependencies: MessagesCo
             preflight: { resolved, _ in
                 let original = try observation.resolved(matching: resolved.command)
                 var db = try dependencies.makeChatDB(book)
-                guard let target = try loadBoundReactionTarget(db: &db, expected: original) else {
+                guard try loadBoundReactionInspect(db: &db, expected: original, gate: gate) != nil else {
                     throw ReactionTargetDrift()
                 }
-                try validateReactionSandbox(target: target, db: db, gate: gate)
                 try requireReactionAccessibility(dependencies.accessibilityDiagnostic())
                 return .requiresMutation
             },
@@ -562,7 +565,7 @@ private func runReactionMutation(global: GlobalOptions, dependencies: MessagesCo
                 guard !context.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
                 guard let proof = reactionACKProof(response: response, operation: operation) else { return nil }
                 var db = try dependencies.makeChatDB(book)
-                guard let fresh = try loadBoundReactionInspect(db: &db, expected: original) else { return nil }
+                guard let fresh = try loadBoundReactionInspect(db: &db, expected: original, gate: gate) else { return nil }
                 let verification = ReactionBoundVerification(
                     verification: "observedState: UI selected state and database target identity verified requested \(desiredReactionText(original.reactionKey))",
                     inspect: fresh,
@@ -600,25 +603,29 @@ private func runReactionMutation(global: GlobalOptions, dependencies: MessagesCo
             throw AppleError.upstream("Messages reaction automation was cancelled; check `messages automation status` before retrying")
         case .verificationFailed:
             throw AppleError.upstream("Messages reaction automation could not verify the requested UI state and database target identity; check `messages automation status` before retrying")
-        case .requestNotSent(let value), .spawnOrSetupFailedBeforeRequest(let value),
-             .childRefusedOrFailed(let value), .protocolViolation(let value):
+        case .requestNotSent(let value), .spawnOrSetupFailedBeforeRequest(let value):
             throw reactionStateError(value)
+        case .childRefusedOrFailed(let value), .protocolViolation(let value):
+            throw reactionStateError(value, afterHandoff: true)
         }
     }
 }
 
-private func reactionStateError(_ value: String) -> AppleError {
+private func reactionStateError(_ value: String, afterHandoff: Bool = false) -> AppleError {
+    let guidance = afterHandoff
+        ? " The reaction may have changed. Inspect the conversation and `messages automation status` before retrying or using `messages automation recover`."
+        : ""
     if value == "custom-reaction-execution-unsupported" {
-        return AppleError.safetyViolation("implicit custom removal is not supported by this experimental version")
+        return AppleError.safetyViolation("implicit custom removal is not supported by this experimental version" + guidance)
     }
     if value.hasPrefix("accessibility-not-trusted:") {
         return AppleError.permissionDenied(
-            "Messages reaction automation requires Accessibility permission before launching the UI worker.",
+            "Messages reaction automation requires Accessibility permission before launching the UI worker." + guidance,
             status: "accessibility_not_trusted",
             remediation: "Enable Accessibility for apple or the host app shown by macOS in System Settings > Privacy & Security > Accessibility, then retry.")
     }
     return AppleError(type: AppleErrorType.upstream,
-                      message: "Messages reaction automation failed: \(value)",
+                      message: "Messages reaction automation failed: \(value)" + guidance,
                       exitCode: AppleExit.upstream)
 }
 

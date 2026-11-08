@@ -1752,6 +1752,114 @@ struct MessagesCommandDependencyTests {
         #expect(dbLoads.value == 0)
     }
 
+    @Test(arguments: [false, true])
+    func reactionPreflightRetainsImplicitOrExplicitSelection(_ explicit: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let path = fx.path, text = "apple-cli-test target"
+        let full = commandNativeArchive(text, [(commandNativePartKey, NSNumber(value: 2),
+                                               NSRange(location: 0, length: text.utf16.count))])
+        let split = commandNativeArchive(text, [(commandNativePartKey, NSNumber(value: 2),
+                                                commandReactionRange(text, "target"))])
+        try replaceReplyAttributedBody(path: path, rowid: 70, body: full)
+        let checked = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let payload = try JSONDecoder().decode(MessagesReactionWorkerPayload.self, from: #require(resolved.command.payload))
+            let target = MessagesReactionWorkerTarget(databasePath: path)
+            try target.validate(payload, deadline: action.deadline)
+            try replaceReplyAttributedBody(path: path, rowid: 70, body: split)
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            if explicit {
+                try target.validate(payload, deadline: action.deadline)
+                #expect(try action.preflight(resolved, context) == .requiresMutation)
+            } else {
+                #expect(throws: MessagesReactionAXError.targetDrift) { try target.validate(payload, deadline: action.deadline) }
+                #expect(throws: (any Error).self) { try action.preflight(resolved, context) }
+            }
+            checked.withLock { $0 = true }
+            return .verificationFailed
+        }
+        let args = ["--chat-rowid", "3", "--message-rowid", "70", "--reaction", "like",
+                    "--experimental-ui-handoff", "--test-mode", "--execute"] + (explicit ? ["--part-index", "2"] : [])
+        _ = try captureCommand { try ReactionSet.parse(args).run(dependencies: deps) }
+        #expect(checked.value)
+    }
+
+    @Test(arguments: ["unchanged", "alias", "owner", "label", "guid", "chat", "participant", "style",
+                      "membership", "participant-key", "BOM-participant", "generated-guid",
+                      "duplicate-membership", "conflicting-duplicate", "at-edge-cap", "excess-duplicates"])
+    func reactionWorkerChecksResolvedTargetAtDispatch(_ variation: String) throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let path = fx.path
+        let checked = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let bytes = try #require(resolved.command.payload)
+            let payload = try JSONDecoder().decode(MessagesReactionWorkerPayload.self, from: bytes)
+            let guardTarget = MessagesReactionWorkerTarget(databasePath: path)
+            try guardTarget.validate(payload, deadline: action.deadline)
+            let sql: String?
+            switch variation {
+            case "alias": sql = "UPDATE message SET guid='p:2/bp:reaction-target' WHERE ROWID=1"
+            case "owner": sql = "UPDATE message SET is_from_me=1-is_from_me WHERE ROWID=70"
+            case "label": sql = "UPDATE message SET text='other label' WHERE ROWID=70"
+            case "guid": sql = "UPDATE message SET guid='other-guid' WHERE ROWID=70"
+            case "chat": sql = "UPDATE chat SET guid='other-chat' WHERE ROWID=3"
+            case "participant": sql = "UPDATE handle SET id='+12125550101' WHERE ROWID=1"
+            case "style": sql = "UPDATE chat SET style=43 WHERE ROWID=3"
+            case "membership": sql = "INSERT INTO chat_message_join VALUES (3,70.5)"
+            case "duplicate-membership": sql = "INSERT INTO chat_message_join VALUES (3,70)"
+            case "conflicting-duplicate": sql = "INSERT INTO chat_message_join VALUES (3,70),(4,70)"
+            case "at-edge-cap", "excess-duplicates":
+                let additional = variation == "at-edge-cap" ? 9_999 : 10_000
+                sql = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<\(additional)) INSERT INTO chat_message_join SELECT 3,70 FROM n"
+            case "participant-key": sql = "INSERT INTO chat_handle_join VALUES (3.5,1)"
+            case "BOM-participant": sql = "UPDATE handle SET id=char(65279)||id WHERE ROWID=1"
+            case "generated-guid":
+                sql = "ALTER TABLE message RENAME COLUMN guid TO source_guid; ALTER TABLE message ADD COLUMN guid TEXT AS (source_guid)"
+            default: sql = nil
+            }
+            if let sql {
+                try execReplySQL(path: path, sql)
+                if variation == "duplicate-membership" || variation == "at-edge-cap" {
+                    try guardTarget.validate(payload, deadline: action.deadline)
+                } else {
+                    #expect(throws: MessagesReactionAXError.targetDrift) {
+                        try guardTarget.validate(payload, deadline: action.deadline)
+                    }
+                }
+            }
+            checked.withLock { $0 = true }
+            return .verificationFailed
+        }
+        _ = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--execute", "--test-mode"]).run(dependencies: deps)
+        }
+        #expect(checked.value)
+    }
+
+    @Test(arguments: [false, true])
+    func ambiguousReactionRefusesBeforeWorker(_ execute: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "synthetic-reaction", part: 0)
+        let launched = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+        let args = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "0",
+                    "--reaction", "like", "--test-mode", execute ? "--execute" : "--dry-run"]
+        let result = try captureCommand { try ReactionSet.parse(args).run(dependencies: deps) }
+        #expect(result.exitCode == AppleExit.usage)
+        #expect(!launched.value)
+    }
+
     @Test func reactionSetDryRunDoesNotLaunchObservedWorkerOrCreateJournal() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()
@@ -3413,6 +3521,7 @@ struct MessagesCommandDependencyTests {
         let error = try errorPayload(from: result.stdout)
         #expect(error["type"] as? String == AppleErrorType.upstream)
         #expect((error["message"] as? String)?.contains("reaction-unavailable") == true)
+        #expect((error["message"] as? String)?.contains("reaction may have changed") == true)
         #expect(resolvedBeforeFailure.value == true)
     }
 

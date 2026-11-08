@@ -14,6 +14,7 @@ struct MessagesReactionWorkerPayload: Codable, Equatable, Sendable {
     // Optional native part address p:<index>/<messageGUID>, never an attachment GUID.
     let nativePartGUID: String?
     let reaction: MessagesReaction
+    let evidence: MessagesReactionTargetEvidence?
     let experimentalUIHandoff: Bool
 
     static func == (lhs: Self, rhs: Self) -> Bool {
@@ -21,7 +22,7 @@ struct MessagesReactionWorkerPayload: Codable, Equatable, Sendable {
             lhs.messageGUID.utf8.elementsEqual(rhs.messageGUID.utf8) &&
             lhs.nativePartIndex == rhs.nativePartIndex &&
             lhs.nativePartGUID.map { Array($0.utf8) } == rhs.nativePartGUID.map { Array($0.utf8) } &&
-            lhs.reaction == rhs.reaction &&
+            lhs.reaction == rhs.reaction && lhs.evidence == rhs.evidence &&
             lhs.experimentalUIHandoff == rhs.experimentalUIHandoff
     }
 
@@ -32,6 +33,7 @@ struct MessagesReactionWorkerPayload: Codable, Equatable, Sendable {
         case nativePartIndex = "native_part_index"
         case nativePartGUID = "native_part_guid"
         case reaction
+        case evidence
         case experimentalUIHandoff = "experimental_ui_handoff"
     }
 
@@ -41,6 +43,7 @@ struct MessagesReactionWorkerPayload: Codable, Equatable, Sendable {
          nativePartIndex: Int,
          nativePartGUID: String?,
          reaction: MessagesReaction,
+         evidence: MessagesReactionTargetEvidence? = nil,
          experimentalUIHandoff: Bool = false) throws {
         _ = try MessagesReactionRequest(operation: operation, chatGUID: chatGUID,
                                         messageGUID: messageGUID, nativePartIndex: nativePartIndex,
@@ -51,6 +54,7 @@ struct MessagesReactionWorkerPayload: Codable, Equatable, Sendable {
         self.messageGUID = messageGUID
         self.nativePartIndex = nativePartIndex
         self.nativePartGUID = nativePartGUID
+        self.evidence = evidence
         self.reaction = reaction
         self.experimentalUIHandoff = experimentalUIHandoff
         guard try workerPayloadData().count <= 4096 else { throw MessagesReactionAXError.invalidPayload }
@@ -64,6 +68,7 @@ struct MessagesReactionWorkerPayload: Codable, Equatable, Sendable {
                       nativePartIndex: container.decode(Int.self, forKey: .nativePartIndex),
                       nativePartGUID: container.decodeIfPresent(String.self, forKey: .nativePartGUID),
                       reaction: container.decode(MessagesReaction.self, forKey: .reaction),
+                      evidence: container.decodeIfPresent(MessagesReactionTargetEvidence.self, forKey: .evidence),
                       experimentalUIHandoff: container.decodeIfPresent(Bool.self, forKey: .experimentalUIHandoff) ?? false)
     }
 
@@ -90,7 +95,12 @@ struct MessagesReactionWorkerPayload: Codable, Equatable, Sendable {
 struct MessagesReactionWorkerRegistry: WorkerOperationRegistry, @unchecked Sendable {
     private let driver: any MessagesReactionAXDriving
 
-    init(driver: any MessagesReactionAXDriving = LiveMessagesReactionAXDriver()) {
+    typealias TargetCheck = (MessagesReactionWorkerPayload, WorkerDeadline) throws -> Void
+    private let check: TargetCheck
+
+    init(driver: any MessagesReactionAXDriving = LiveMessagesReactionAXDriver(),
+         check: @escaping TargetCheck = { try MessagesReactionWorkerTarget(databasePath: ChatDB.defaultPath()).validate($0, deadline: $1) }) {
+        self.check = check
         self.driver = driver
     }
 
@@ -100,7 +110,7 @@ struct MessagesReactionWorkerRegistry: WorkerOperationRegistry, @unchecked Senda
               let decoded = try? JSONDecoder().decode(MessagesReactionWorkerPayload.self, from: payload),
               (command.name == "messages.reaction.set") == (decoded.operation == .set)
         else { return nil }
-        return MessagesReactionWorkerOperation(payload: decoded, driver: driver)
+        return MessagesReactionWorkerOperation(payload: decoded, driver: driver, check: check)
     }
 }
 
@@ -108,8 +118,16 @@ private struct MessagesReactionWorkerOperation: WorkerOperation, @unchecked Send
     let payload: MessagesReactionWorkerPayload
     let driver: any MessagesReactionAXDriving
 
+    let check: MessagesReactionWorkerRegistry.TargetCheck
+
     func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerOperationResult {
-        let outcome = try MessagesReactionAXAutomation(driver: driver).apply(payload.request(), deadline: deadline)
+        var refused = false
+        let automation = MessagesReactionAXAutomation(driver: driver, validateTarget: { bound in
+            guard !refused else { throw MessagesReactionAXError.targetDrift }
+            do { try check(payload, bound) }
+            catch { refused = true; throw error }
+        })
+        let outcome = try automation.apply(payload.request(), deadline: deadline)
         switch outcome {
         case .ack(let detail):
             return WorkerOperationResult(.ack, detail: detail)

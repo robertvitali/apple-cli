@@ -47,7 +47,7 @@ struct MessagesReplyWorkerTarget {
         let member = try one(scope, """
             SELECT j.chat_id, j.handle_id, h._rowid_ AS owner, typeof(h.id) AS storage, CAST(h.id AS BLOB) AS address
             FROM chat_handle_join j LEFT JOIN handle h ON h._rowid_=j.handle_id
-            WHERE \(membershipPredicate(column: "j.chat_id", id: chatID)) LIMIT 2
+            WHERE \(MessagesNativeTargetLookup.membershipPredicate(column: "j.chat_id", id: chatID)) LIMIT 2
             """, String(chatID))
         guard member.values["chat_id"] == .integer(chatID), case .integer(let id)? = member.values["handle_id"],
               id > 0, member.values["owner"] == .integer(id), member.values["storage"] == .text("text"),
@@ -108,7 +108,7 @@ struct MessagesReplyWorkerTarget {
               case .blob(let archive)? = row.values["archive"] else { throw MessagesReplyComposerAXError.targetDrift }
         let membership = try one(scope, """
             SELECT chat_id, message_id FROM chat_message_join
-            WHERE \(membershipPredicate(column: "message_id", id: id)) LIMIT 2
+            WHERE \(MessagesNativeTargetLookup.membershipPredicate(column: "message_id", id: id)) LIMIT 2
             """, String(id))
         guard membership.values["chat_id"] == .integer(chatID), membership.values["message_id"] == .integer(id) else {
             throw MessagesReplyComposerAXError.targetDrift
@@ -131,24 +131,7 @@ struct MessagesReplyWorkerTarget {
                        origin: origin, linkageIsNull: originGUID == nil && originPart == nil)
     }
 
-    // A positive ID can be hidden in a REAL that truncates to it, or a TEXT/BLOB key.
-    // Unary + keeps the numeric bound free of affinity even on untyped join columns.
-    // Both range endpoints can then constrain the index before CAST filters candidates.
-    private func membershipPredicate(column: String, id: Int64) -> String {
-        let ceiling = id == .max ? "''" : "(CAST(?1 AS INTEGER) + 1)"
-        return """
-            (\(column) BETWEEN +CAST(?1 AS INTEGER) AND \(ceiling) OR \(column) >= '')
-            AND (\(column) = CAST(?1 AS INTEGER) OR CAST(\(column) AS INTEGER) = CAST(?1 AS INTEGER))
-            """
-    }
-
     private func one(_ scope: SQLiteReadTransaction, _ sql: String, _ bind: String) throws -> SQLiteReader.Row {
-        var result: SQLiteReader.Row?
-        try scope.forEachRow(sql, [bind]) { row in
-            guard result == nil else { throw MessagesReplyComposerAXError.targetDrift }
-            result = row
-        }
-        guard let result else { throw MessagesReplyComposerAXError.targetDrift }
-        return result
+        try MessagesNativeTargetLookup.one(scope, sql, [bind])
     }
 }

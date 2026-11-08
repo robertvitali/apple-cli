@@ -123,7 +123,7 @@ struct MessagesReactionAXAutomationTests {
                 messageGUID: "message-guid", nativePartIndex: 2,
                 nativePartGUID: "p:2/message-guid", reaction: .standard(.heart))
             let command = try WorkerCommand(name: "messages.reaction.set", payload: payload.workerPayloadData())
-            let operation = try #require(MessagesReactionWorkerRegistry(driver: driver).operation(for: command))
+            let operation = try #require(MessagesReactionWorkerRegistry(driver: driver, check: { _, _ in }).operation(for: command))
 
             let result = try operation.run(workerRequest(command: command), deadline: .millisecondsFromNow(2_000))
 
@@ -138,7 +138,7 @@ struct MessagesReactionAXAutomationTests {
             messageGUID: "message-guid", nativePartIndex: 2,
             nativePartGUID: "p:2/message-guid", reaction: .standard(.heart))
         let command = try WorkerCommand(name: "messages.reaction.set", payload: payload.workerPayloadData())
-        let operation = try #require(MessagesReactionWorkerRegistry(driver: failedDriver).operation(for: command))
+        let operation = try #require(MessagesReactionWorkerRegistry(driver: failedDriver, check: { _, _ in }).operation(for: command))
 
         let result = try operation.run(workerRequest(command: command), deadline: .millisecondsFromNow(2_000))
 
@@ -740,6 +740,40 @@ struct MessagesReactionAXAutomationTests {
         #expect(driver.button.performed == ["AXPress"])
     }
 
+    @Test(arguments: [MessagesReactionWorkerPayload.Operation.set, .remove])
+    func changedTargetAfterOpeningPickerRefusesReaction(_ op: MessagesReactionWorkerPayload.Operation) throws {
+        let fx = try ChatFixture()
+        try fx.exec("ALTER TABLE message ADD COLUMN associated_message_guid TEXT")
+        try fx.exec("ALTER TABLE message ADD COLUMN associated_message_type INTEGER")
+        let body = NSAttributedString(string: "target", attributes: [NSAttributedString.Key("__kIMMessagePartAttributeName"): 2])
+        try fx.insertMessage(rowid: 70, guid: "original-guid", text: "target",
+                             attributedBody: NSArchiver.archivedData(withRootObject: body), chatRowid: 3, date: fx.base)
+        var db = try ChatDB(path: fx.path, book: AddressBook(contacts: [:]), copyToTemp: false, homeDirectoryForTilde: fx.homePath)
+        let result = try db.exactReactionInspect(chat: .rowid(3), message: .rowid(70), partIndex: 2)
+        try #require(result.target.mutation_eligible)
+        let driver = FakeReactionDriver()
+        driver.button.isSelected = op == .remove
+        let open = driver.message.onAction
+        driver.message.onAction = { action in
+            try open?(action)
+            try fx.exec("UPDATE message SET guid='changed-guid' WHERE ROWID=70")
+        }
+        let evidence = MessagesReactionTargetEvidence(chatRowID: 3, messageRowID: 70, fromMe: false,
+            explicitPart: true, attachmentGUIDBytes: nil,
+            bodyDigest: MessagesReactionTargetEvidence.digest(Data("target".utf8)),
+            sandboxParticipant: Data("+12125550100".utf8))
+        let data = try MessagesReactionWorkerPayload(operation: op, chatGUID: "iMessage;-;+12125550100",
+            messageGUID: "original-guid", nativePartIndex: 2, nativePartGUID: "p:2/original-guid",
+            reaction: .standard(.heart), evidence: evidence).workerPayloadData()
+        let command = try WorkerCommand(name: "messages.reaction.\(op.rawValue)", payload: data)
+        let worker = try #require(MessagesReactionWorkerRegistry(driver: driver, check: {
+            try MessagesReactionWorkerTarget(databasePath: fx.path).validate($0, deadline: $1)
+        }).operation(for: command))
+        _ = try worker.run(workerRequest(command: command), deadline: .millisecondsFromNow(2_000))
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.button.performed.isEmpty)
+    }
+
     @Test func menuHidingTranscriptRefusesBeforeReactionPress() throws {
         let driver = FakeReactionDriver()
         driver.message.onAction = { _ in
@@ -1295,6 +1329,38 @@ struct MessagesReactionAXAutomationTests {
 
         #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
         #expect(driver.customChooserKeyPresses == [.downArrow, .returnKey])
+    }
+
+    @Test(arguments: ["after-query", "before-return", "cleanup"])
+    func changedDatabaseTargetPreservesCustomChooserState(_ phase: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark", position: 1)
+        let payload = try MessagesReactionWorkerPayload(operation: .set, chatGUID: "chat-guid",
+            messageGUID: "message-guid", nativePartIndex: 2, nativePartGUID: "p:2/message-guid",
+            reaction: .custom("✅"), experimentalUIHandoff: true)
+        let command = try WorkerCommand(name: "messages.reaction.set", payload: payload.workerPayloadData())
+        if phase == "cleanup" {
+            let duplicate = driver.customCandidate.clone()
+            duplicate.parentNode = driver.customPopover
+            duplicate.processID = driver.processIdentity.pid
+            driver.customPopover.navigationNodes?.append(duplicate)
+        }
+        var failedOnce = false
+        let worker = try #require(MessagesReactionWorkerRegistry(driver: driver, check: { _, _ in
+            let changed = phase == "before-return" ? driver.customChooserKeyPresses.contains(.rightArrow)
+                : !driver.customSearchField.setValues.isEmpty
+            if changed && !failedOnce {
+                failedOnce = true
+                throw MessagesReactionAXError.targetDrift
+            }
+        }).operation(for: command))
+        let result = try worker.run(workerRequest(command: command), deadline: .millisecondsFromNow(10_000))
+        #expect(result.category == .refused)
+        #expect(failedOnce)
+        #expect(driver.customSearchField.setValues == ["check mark"])
+        #expect(driver.customChooserKeyPresses == (phase == "before-return" ? [.downArrow, .rightArrow] : []))
+        #expect(driver.customCandidate.performed.isEmpty)
     }
 
     @Test func customChooserRevalidatesOwnedQueryBeforeEveryKey() throws {
