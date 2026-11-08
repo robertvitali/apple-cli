@@ -81,6 +81,28 @@ import Testing
         }
     }
 
+    @Test(arguments: [
+        ("\u{0085}+12125550100", "+12125550100"),
+        ("+12125550100", "+12125550100\n"),
+        ("user\u{0080}@example.com", "user\u{0080}@example.com")
+    ])
+    func sandboxRefusesControlCharactersInEitherRecipient(_ participant: String, _ allowed: String) throws {
+        let fx = try fixture()
+        let hex = participant.utf8.map { String(format: "%02x", $0) }.joined()
+        try fx.exec("UPDATE handle SET id=CAST(X'\(hex)' AS TEXT) WHERE ROWID=1")
+        let deps = MessagesCommandDependencies.fixture(launchObservedWorker: { _ in
+            Issue.record("unauthorized sandbox edit reached the worker")
+            return .childRefusedOrFailed("unexpected")
+        }, allowedRecipients: [allowed])
+        for mode in ["--dry-run", "--execute"] {
+            let (output, code) = try run(fx, flags: [mode, "--test-mode", "--experimental-ui-handoff"], dependencies: deps)
+            #expect(code == AppleExit.permissionDenied)
+            let error = output["error"] as? [String: Any]
+            #expect(error?["type"] as? String == AppleErrorType.safetyViolation)
+            #expect(error?["sandbox"] as? Bool == true)
+        }
+    }
+
     private func run(_ fx: ChatFixture, flags: [String], dependencies: MessagesCommandDependencies) throws -> ([String: Any], Int32?) {
         let stdout = MemoryOutputSink(), stderr = MemoryOutputSink()
         var code: Int32?
