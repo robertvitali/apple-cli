@@ -676,6 +676,9 @@ JSON output are stable per the versioning policy — breaking changes bump
 - Reply verification excludes messages already present during preflight, even
   when their conversation link is added after the send.
 
+- Messages attachment checks now refuse symlink ancestors when a filename begins
+  with a Unicode combining mark, including during attachment reply verification.
+
 - Experimental attachment retrieval reports fixed failure stages and categories
   instead of collapsing observation and native-action failures into one generic
   error. Diagnostics contain no target values or native error text and do not

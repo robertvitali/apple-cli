@@ -513,6 +513,61 @@ struct ChatDBFixtureTests {
         #expect(symlink.exists == nil)
     }
 
+    @Test func combiningMarkAfterHomeOrRootSeparatorKeepsTheDisplayPath() throws {
+        let fx = try ChatFixture()
+        let leaf = "\u{301}fixture"
+        let present = URL(fileURLWithPath: fx.homePath).appendingPathComponent(leaf)
+        try Data([1]).write(to: present)
+        try fx.exec("UPDATE attachment SET filename='~/\(leaf)' WHERE ROWID=15")
+        try fx.exec("UPDATE attachment SET filename='/\(leaf)' WHERE ROWID=16")
+        var db = try makeDB(fx, book: friendBook)
+        let message = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100).first { $0.rowid == 9 })
+        let homeFile = try #require(message.attachments.first { $0.rowid == 15 })
+        #expect(homeFile.path == present.path)
+        #expect(homeFile.exists == true)
+        let absolute = try #require(message.attachments.first { $0.rowid == 16 })
+        #expect(absolute.path == "/" + leaf)
+        #expect(absolute.exists == nil)
+    }
+
+    @Test(arguments: ["/var", "/tmp"])
+    func knownSystemAliasProbesMissingCombiningMarkLeaf(alias: String) throws {
+        let fx = try ChatFixture()
+        let path = alias + "/\u{301}apple-cli-test-" + UUID().uuidString
+        try fx.exec("UPDATE attachment SET filename='\(path)' WHERE ROWID=15")
+        var db = try ChatDB(path: fx.path, book: friendBook, copyToTemp: false, homeDirectoryForTilde: alias)
+        let message = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100).first { $0.rowid == 9 })
+        let attachment = try #require(message.attachments.first { $0.rowid == 15 })
+        #expect(attachment.path == path)
+        #expect(attachment.exists == false)
+    }
+
+    @Test func embeddedNULPreservesRawAttachmentFilenameWithoutProbingItsPrefix() throws {
+        let fx = try ChatFixture()
+        try fx.exec("UPDATE attachment SET filename=filename || char(0) || 'suffix' WHERE ROWID=15")
+        var db = try makeDB(fx, book: friendBook)
+        let message = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100).first { $0.rowid == 9 })
+        let attachment = try #require(message.attachments.first { $0.rowid == 15 })
+        #expect(attachment.filename == "~/Library/Messages/Attachments/zz/../zz/apple-cli-present.png\0suffix")
+        #expect(attachment.path == nil)
+        #expect(attachment.exists == nil)
+    }
+
+    @Test func attachmentExistenceRefusesSymlinkBeforeCombiningMark() throws {
+        let fx = try ChatFixture()
+        let home = URL(fileURLWithPath: fx.homePath)
+        let root = home.appendingPathComponent("Library/Messages/Attachments")
+        let leaf = "\u{301}present"
+        try Data([1]).write(to: home.appendingPathComponent(leaf))
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("linked"), withDestinationURL: home)
+        try fx.exec("UPDATE attachment SET filename='~/Library/Messages/Attachments/linked/\(leaf)' WHERE ROWID=21")
+        var db = try makeDB(fx, book: friendBook)
+        let msg = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100).first { $0.rowid == 9 })
+        let attachment = try #require(msg.attachments.first { $0.rowid == 21 })
+        #expect(attachment.path == root.path + "/linked/" + leaf)
+        #expect(attachment.exists == nil)
+    }
+
     @Test func nullAttachmentFieldsSurviveTheSQLPath() throws {
         let fx = try ChatFixture()
         var db = try makeDB(fx, book: friendBook)

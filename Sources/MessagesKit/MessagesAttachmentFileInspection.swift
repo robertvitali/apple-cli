@@ -42,7 +42,7 @@ struct MessagesAttachmentFileInspection {
     }
 
     private func confinedComponents(_ raw: String) -> [String]? {
-        guard Self.safeText(raw), Self.safeText(home), home.hasPrefix("/") else { return nil }
+        guard Self.safeText(raw), Self.safeText(home), home.utf8.first == 0x2f else { return nil }
         let root = home + "/Library/Messages/Attachments"
         let prefixes = ["~/Library/Messages/Attachments/", root + "/",
                         displayedHome + "/Library/Messages/Attachments/"]
@@ -50,7 +50,8 @@ struct MessagesAttachmentFileInspection {
         let suffix = String(decoding: raw.utf8.dropFirst(prefix.utf8.count), as: UTF8.self)
         let full = root + "/" + suffix
         guard full.utf8.count <= 4_096 else { return nil }
-        let components = full.dropFirst().split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        // POSIX treats every slash as a separator, even before a combining mark.
+        let components = full.unicodeScalars.dropFirst().split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !components.isEmpty, components.count <= 128,
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
         return components
@@ -64,7 +65,7 @@ struct MessagesAttachmentFileInspection {
         guard directory >= 0 else { return .unavailable }
         var keep = false
         defer { if !keep { close(directory) } }
-        let rootComponentCount = home.dropFirst().split(separator: "/").count + 3
+        let rootComponentCount = home.unicodeScalars.dropFirst().split(separator: "/").count + 3
         for (index, component) in components.enumerated() {
             try checkpoint()
             let leaf = index == components.count - 1
@@ -96,6 +97,6 @@ struct MessagesAttachmentFileInspection {
     }
 
     private static func canonicalSystemAlias(_ path: String) -> String {
-        path.hasPrefix("/var/") ? "/private" + path : path
+        path.utf8.starts(with: "/var/".utf8) ? "/private" + path : path
     }
 }

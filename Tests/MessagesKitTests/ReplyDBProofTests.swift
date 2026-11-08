@@ -719,6 +719,31 @@ struct ReplyDBProofTests {
     }
 
     @Test(arguments: [false, true])
+    func replyVerifiesCombiningMarkFilenameDirectlyUnderAttachmentRoot(absolute: Bool) throws {
+        let fx = try replyFixture()
+        let leaf = "\u{301}reply.bin"
+        let root = URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments")
+        let file = root.appendingPathComponent(leaf)
+        let stored = absolute ? file.path : "~/Library/Messages/Attachments/" + leaf
+        let bytes = Data("apple-cli-test".utf8)
+        try bytes.write(to: file)
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "unicode-reply", textSQL: "NULL",
+                                        chatRowid: 3, parentGUID: "reply-root", parentPart: "2",
+                                        attachmentRowid: 401, attachmentGUID: "unicode-file", filename: stored,
+                                        totalBytesSQL: String(bytes.count))
+        db = try makeDB(fx)
+        let proof = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater,
+                                                              target: target, expectedAttachmentSHA256: sha256(bytes),
+                                                              expectedAttachmentSize: bytes.count)
+        #expect(proof.status == "verified")
+        #expect(proof.message_guid == "unicode-reply")
+        #expect(proof.attachment_filename == stored)
+    }
+
+    @Test(arguments: [false, true])
     func attachmentReplyProofRejectsMalformedJoinsPathsRowsAndContent(threadRoot: Bool) throws {
         for (name, mutation, reason) in [
             ("wrong-chat", { (fx: ChatFixture, _: Int64, _: URL, bytes: Data) throws in
@@ -792,6 +817,17 @@ struct ReplyDBProofTests {
                 try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "symlink-ancestor", textSQL: "NULL", chatRowid: 3,
                                                 parentGUID: "reply-root", parentPart: "2", attachmentRowid: 512,
                                                 attachmentGUID: "a512", filename: "~/Library/Messages/Attachments/link/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "unsafe-attachment-path"),
+            ("symlink-before-combining-mark", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                let home = URL(fileURLWithPath: fx.homePath)
+                let leaf = "\u{301}reply.bin"
+                try bytes.write(to: home.appendingPathComponent(leaf))
+                let link = home.appendingPathComponent("Library/Messages/Attachments/linked")
+                try FileManager.default.createSymbolicLink(at: link, withDestinationURL: home)
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "combining-mark-link", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 515,
+                                                attachmentGUID: "a515", filename: link.path + "/" + leaf,
                                                 totalBytesSQL: String(bytes.count))
             }, "unsafe-attachment-path"),
             ("symlink-final", { (fx: ChatFixture, highwater: Int64, url: URL, bytes: Data) throws in

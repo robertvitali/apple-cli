@@ -24,6 +24,22 @@ import Testing
         #expect(try probe.inspect(filename: directoryLink + "/apple-cli-present.png") == .unavailable)
     }
 
+    @Test func combiningMarkAfterSlashPreservesConfinement() throws {
+        let fx = try ChatFixture()
+        let home = URL(fileURLWithPath: fx.homePath)
+        let root = home.appendingPathComponent("Library/Messages/Attachments")
+        let leaf = "\u{301}fixture"
+        try Data([1]).write(to: home.appendingPathComponent(leaf))
+        try Data([2]).write(to: root.appendingPathComponent(leaf))
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("linked"), withDestinationURL: home)
+        let probe = MessagesAttachmentFileInspection(homeDirectory: fx.homePath)
+        for prefix in [root.path, "~/Library/Messages/Attachments"] {
+            #expect(try probe.inspect(filename: prefix + "/" + leaf) == .readableRegularFile)
+            #expect(try probe.inspect(filename: prefix + "/linked/" + leaf) == .unavailable)
+            #expect(try probe.inspect(filename: prefix + "/../" + leaf) == .unavailable)
+        }
+    }
+
     @Test func noOutboundSizeLimitAndPermissionFailure() throws {
         let fx = try ChatFixture()
         let probe = MessagesAttachmentFileInspection(homeDirectory: fx.homePath)

@@ -480,19 +480,19 @@ public struct ChatDB {
     }
 
     private func attachmentPath(from raw: String?) -> (path: String?, exists: Bool?) {
-        guard let raw, !raw.isEmpty else { return (nil, nil) }
+        guard let raw, !raw.isEmpty, !raw.utf8.contains(0) else { return (nil, nil) }
         let expanded: String
         if raw == "~" {
             expanded = homeDirectoryForTilde
-        } else if raw.hasPrefix("~/") {
-            let suffix = String(raw.dropFirst(2))
+        } else if raw.utf8.starts(with: "~/".utf8) {
+            let suffix = String(decoding: raw.utf8.dropFirst(2), as: UTF8.self)
             expanded = URL(fileURLWithPath: homeDirectoryForTilde, isDirectory: true)
                 .appendingPathComponent(suffix)
                 .path
         } else {
             expanded = NSString(string: raw).expandingTildeInPath
         }
-        guard expanded.hasPrefix("/") else { return (nil, nil) }
+        guard expanded.utf8.first == 0x2f else { return (nil, nil) }
         let standardized = URL(fileURLWithPath: expanded).standardizedFileURL.path
         guard shouldProbeAttachmentPath(standardized) else {
             return (standardized, nil)
@@ -503,7 +503,7 @@ public struct ChatDB {
     private func shouldProbeAttachmentPath(_ standardized: String) -> Bool {
         let skippedRoots = ["/net", "/home", "/Network/Servers", "/Volumes"]
         if skippedRoots.contains(where: { root in
-            standardized == root || standardized.hasPrefix(root + "/")
+            standardized.utf8.elementsEqual(root.utf8) || standardized.utf8.starts(with: (root + "/").utf8)
         }) {
             return false
         }
@@ -512,31 +512,33 @@ public struct ChatDB {
             return [url.standardizedFileURL.path, url.resolvingSymlinksInPath().standardizedFileURL.path]
         }
         return safeRoots.contains { root in
-            standardized == root || standardized.hasPrefix(root + "/")
+            standardized.utf8.elementsEqual(root.utf8) || standardized.utf8.starts(with: (root + "/").utf8)
         }
     }
 
     private func safeLocalExists(atPath path: String) -> Bool? {
-        var current = ""
-        for component in path.split(separator: "/") {
-            current = current.isEmpty ? "/" + component : current + "/" + component
-            var info = stat()
-            if lstat(current, &info) != 0 {
-                return current == path && errno == ENOENT ? false : nil
-            }
-            if (info.st_mode & S_IFMT) == S_IFLNK {
-                return nil
-            }
+        let components = path.unicodeScalars.split(separator: "/")
+        guard let leaf = components.last else { return path == "/" ? true : nil }
+        var directory = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { return nil }
+        defer { close(directory) }
+        for component in components.dropLast() {
+            let next = openat(directory, String(component), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard next >= 0 else { return nil }
+            close(directory)
+            directory = next
         }
-        return true
+        var info = stat()
+        guard fstatat(directory, String(leaf), &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+            return errno == ENOENT ? false : nil
+        }
+        return (info.st_mode & S_IFMT) == S_IFLNK ? nil : true
     }
 
     private func probePath(for standardized: String) -> String {
-        if standardized == "/var" || standardized.hasPrefix("/var/") {
+        if standardized == "/var" || standardized.utf8.starts(with: "/var/".utf8)
+            || standardized == "/tmp" || standardized.utf8.starts(with: "/tmp/".utf8) {
             return "/private" + standardized
-        }
-        if standardized == "/tmp" || standardized.hasPrefix("/tmp/") {
-            return "/private/tmp" + standardized.dropFirst(4)
         }
         return standardized
     }
@@ -1997,24 +1999,13 @@ public struct ChatDB {
             .appendingPathComponent("Library/Messages/Attachments", isDirectory: true)
             .standardizedFileURL.path
         let canonicalDisplayRoot = Self.canonicalPath(displayRoot)
-        let relativeRaw: String
-        if raw.hasPrefix("~/Library/Messages/Attachments/") {
-            relativeRaw = String(raw.dropFirst("~/Library/Messages/Attachments/".count))
-        } else if raw.hasPrefix(root + "/") {
-            relativeRaw = String(raw.dropFirst(root.count + 1))
-        } else if raw.hasPrefix(displayRoot + "/") {
-            relativeRaw = String(raw.dropFirst(displayRoot.count + 1))
-        } else if raw.hasPrefix(canonicalDisplayRoot + "/") {
-            relativeRaw = String(raw.dropFirst(canonicalDisplayRoot.count + 1))
-        } else {
-            return nil
-        }
-        let rawComponents = relativeRaw.split(separator: "/", omittingEmptySubsequences: false)
-        guard !rawComponents.isEmpty,
-              !rawComponents.contains(where: { $0 == "." || $0 == ".." || $0.isEmpty }) else { return nil }
-        let path = root + "/" + relativeRaw
-        guard path.hasPrefix(root + "/") else { return nil }
-        return path
+        let prefixes = ["~/Library/Messages/Attachments/", root + "/", displayRoot + "/", canonicalDisplayRoot + "/"]
+        guard let prefix = prefixes.first(where: { raw.utf8.starts(with: $0.utf8) }) else { return nil }
+        let suffix = raw.utf8.dropFirst(prefix.utf8.count)
+        let components = suffix.split(separator: 0x2f, omittingEmptySubsequences: false)
+        guard components.allSatisfy({ !$0.isEmpty && !$0.elementsEqual(".".utf8) && !$0.elementsEqual("..".utf8) }),
+              !suffix.isEmpty else { return nil }
+        return root + "/" + String(decoding: suffix, as: UTF8.self)
     }
 
     private static func realpath(_ path: String) -> String? {
@@ -2024,11 +2015,11 @@ public struct ChatDB {
     }
 
     private static func canonicalPath(_ path: String) -> String {
-        path.hasPrefix("/var/") ? "/private" + path : path
+        path.utf8.starts(with: "/var/".utf8) ? "/private" + path : path
     }
 
     private func openAttachmentFileNoFollow(_ absolutePath: String) throws -> Int32 {
-        let components = absolutePath.split(separator: "/").map(String.init)
+        let components = absolutePath.unicodeScalars.split(separator: "/").map(String.init)
         guard !components.isEmpty else { throw AppleError.upstream("unsafe attachment path") }
         var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard current >= 0 else { throw AppleError.upstream("unsafe attachment path") }
