@@ -70,6 +70,18 @@ struct SQLiteReaderURITests {
 
 @Suite("SQLiteReader typed rows")
 struct SQLiteReaderTypedRowTests {
+    @Test func storedTextRetainsEveryUTF8Byte() throws {
+        let db = try SQLiteReader(path: ":memory:")
+        for hex in ["EFBBBF", "EFBBBFEFBBBF610062", "65CC81", "EFBFBD", "F09F9880"] {
+            let row = try #require(db.rows("SELECT CAST(X'\(hex)' AS TEXT) AS value, X'\(hex)' AS raw").first)
+            let text = try #require(row.text("value"))
+            #expect(Data(text.utf8) == row.data("raw"))
+        }
+        #expect(throws: SQLiteReader.DBError.self) {
+            try db.rows("SELECT CAST(X'EFBBBFFF' AS TEXT)")
+        }
+    }
+
     @Test func distinguishesSQLNullFromEmptyTextAndBlobs() throws {
         let reader = try SQLiteReader(path: ":memory:")
         let row = try #require(reader.rows("""

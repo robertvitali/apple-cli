@@ -10,7 +10,7 @@ apple messages get [flags]
 
 ## Description
 
-Fetches one message using exactly one conversation selector (`--chat-guid` or `--chat-rowid`) and exactly one message selector (`--message-guid` or `--message-rowid`). Both identities and their membership are checked in the read-only database snapshot. Duplicate GUIDs, missing rows and a message outside the selected conversation are refused. Identical text in another conversation does not affect selection.
+Fetches one message using exactly one conversation selector (`--chat-guid` or `--chat-rowid`) and exactly one message selector (`--message-guid` or `--message-rowid`). Both identities and their membership are checked in the read-only database snapshot. Duplicate GUIDs, missing rows and a message outside the selected conversation are refused. Identical text in another conversation does not affect selection. For group chats, the returned group name comes from the selected conversation.
 
 ## Options
 

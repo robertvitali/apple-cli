@@ -161,19 +161,16 @@ import AppleKit
 
     @Test func inputBudgetBoundsAThousandVisibleRows() throws {
         let fixture = try ChatFixture()
-        // One shared synthetic near-limit BLOB behind a view avoids a 1GiB test
-        // database. Every row still exercises the real secondary SQL fetch.
+        // The newest four rows exhaust the input budget. Each later row has a
+        // nonempty summary so an extra fetch would be observable.
         try fixture.exec("""
-            ALTER TABLE message RENAME TO message_base;
-            CREATE TABLE synthetic_summary(bytes BLOB);
-            INSERT INTO synthetic_summary VALUES (zeroblob(1048576));
-            CREATE VIEW message AS SELECT b.*,s.bytes AS message_summary_info
-              FROM message_base b CROSS JOIN synthetic_summary s;
+            ALTER TABLE message ADD COLUMN message_summary_info BLOB;
             WITH RECURSIVE seq(n) AS (SELECT 100 UNION ALL SELECT n+1 FROM seq WHERE n<1099)
-            INSERT INTO message_base(ROWID,guid,text,is_from_me,handle_id,service,date,error)
-              SELECT n,'synthetic-'||n,'Synthetic body',0,1,'iMessage',900000000000000000+n,0 FROM seq;
+            INSERT INTO message(ROWID,guid,text,is_from_me,handle_id,service,date,error,message_summary_info)
+              SELECT n,'synthetic-'||n,'Synthetic body',0,1,'iMessage',900000000000000000+n,0,
+                     zeroblob(CASE WHEN n>=1096 THEN 1048576 ELSE 1 END) FROM seq;
             INSERT INTO chat_message_join(chat_id,message_id)
-              SELECT 3,ROWID FROM message_base WHERE ROWID BETWEEN 100 AND 1099;
+              SELECT 3,ROWID FROM message WHERE ROWID BETWEEN 100 AND 1099;
             """)
         var db = try database(fixture)
         var fetches = 0

@@ -1222,9 +1222,13 @@ public struct ChatDB {
 
     private static let exactCursorVersion = 1
     private static let exactCursorMaxBytes = 4096
+    // The first equality can use the column's native index. The second requires
+    // the stored text to match the requested bytes even on NOCASE/RTRIM schemas.
+    private static let exactSelectorGUIDPredicate =
+        "guid = ?1 AND typeof(guid) = 'text' AND CAST(guid AS BLOB) = CAST(?1 AS BLOB)"
     private static let normalizedSecondsSQL = """
         CASE
-          WHEN m.date IS NULL THEN NULL
+          WHEN typeof(m.date) != 'integer' THEN NULL
           WHEN m.date BETWEEN -9999999999 AND 9999999999 THEN m.date
           WHEN m.date < 0 AND (m.date % 1000000000) != 0 THEN (m.date / 1000000000) - 1
           ELSE m.date / 1000000000
@@ -1233,7 +1237,7 @@ public struct ChatDB {
 
     private static let normalizedNanosecondsSQL = """
         CASE
-          WHEN m.date IS NULL THEN NULL
+          WHEN typeof(m.date) != 'integer' THEN NULL
           WHEN m.date BETWEEN -9999999999 AND 9999999999 THEN 0
           ELSE ((m.date % 1000000000) + 1000000000) % 1000000000
         END
@@ -1246,18 +1250,19 @@ public struct ChatDB {
 
     private static func exactMessageSelect(seconds: String = ChatDB.normalizedSecondsSQL,
                                            nanos: String = ChatDB.normalizedNanosecondsSQL,
-                                           schema: ExactReadSchema) -> String {
+                                           membershipJoin: String, schema: ExactReadSchema) -> String {
         let originatorSelect = schema.threadOriginatorColumnsAvailable
             ? "m.thread_originator_guid AS thread_originator_guid, m.thread_originator_part AS thread_originator_part"
             : "NULL AS thread_originator_guid, NULL AS thread_originator_part"
         return """
-        SELECT m.ROWID AS rowid, m.guid AS message_guid, m.date AS date,
+        SELECT m.ROWID AS rowid, m.guid AS message_guid,
+               CASE WHEN typeof(m.date) = 'integer' THEN m.date END AS date,
                \(seconds) AS normalized_seconds,
                \(nanos) AS normalized_nanoseconds,
                m.text AS text, m.attributedBody AS attributedBody,
                typeof(m.attributedBody) AS native_mentions_storage_type,
                m.is_from_me AS is_from_me, m.handle_id AS handle_rowid,
-               m.cache_roomnames AS cache_roomnames, m.service AS service,
+               m.service AS service,
                m.cache_has_attachments AS cache_has_attachments,
                \(originatorSelect),
                \(NativeMessageStatusDecoder.projection(columns: schema.messageColumns)),
@@ -1266,58 +1271,70 @@ public struct ChatDB {
                c.ROWID AS selected_chat_rowid, c.chat_identifier AS chat_identifier,
                c.guid AS chat_guid, c.display_name AS selected_display_name,
                c.style AS selected_style
-        FROM chat_message_join cmj
-        JOIN chat c ON c.ROWID = cmj.chat_id
-        JOIN message m ON m.ROWID = cmj.message_id
+        FROM chat c
+        \(membershipJoin)
         LEFT JOIN handle h ON m.handle_id = h.ROWID
         """
     }
 
     public mutating func exactConversations(limit: Int, order: ExactOrder, cursor: String?) throws -> ExactPage<ExactConversation> {
+        try validateExactLimit(limit)
         _ = try requireExactReadSchema()
-        let firstMaxMessage = try maxRowid(table: "message")
-        let firstMaxChat = try maxRowid(table: "chat")
         let decoded = try decodeCursor(cursor, op: "conversations", chat: nil, order: order)
-        let maxMessage = decoded?.maxMessageRowid ?? firstMaxMessage
-        let maxChat = decoded?.maxChatRowid ?? firstMaxChat
-        let activitySQL = """
-            SELECT cmj.chat_id AS chat_id, m.ROWID AS message_rowid, m.date AS date,
-                   \(ChatDB.normalizedSecondsSQL) AS normalized_seconds,
-                   \(ChatDB.normalizedNanosecondsSQL) AS normalized_nanoseconds
-            FROM chat_message_join cmj
-            JOIN message m ON m.ROWID = cmj.message_id
-            WHERE m.ROWID <= ?1
-            """
-        var activity: [Int64: (raw: Int64?, seconds: Int64?, nanos: Int64?, messageRowid: Int64)] = [:]
-        for row in try reader.rows(activitySQL, [String(maxMessage)]) {
-            guard let chatID = row.int("chat_id"), let mid = row.int("message_rowid") else { continue }
-            let candidate = (raw: row.int("date"), seconds: row.int("normalized_seconds"),
-                             nanos: row.int("normalized_nanoseconds"), messageRowid: mid)
-            if let current = activity[chatID] {
-                if exactCompare(candidate.seconds, candidate.nanos, candidate.messageRowid,
-                                current.seconds, current.nanos, current.messageRowid, order: .desc) {
-                    activity[chatID] = candidate
-                }
-            } else {
-                activity[chatID] = candidate
-            }
+        let maxMessage = try decoded?.maxMessageRowid ?? maxRowid(table: "message")
+        let maxChat = try decoded?.maxChatRowid ?? maxRowid(table: "chat")
+        let direction = order == .asc ? "ASC" : "DESC"
+        let ordering = "normalized_seconds \(direction), normalized_nanoseconds \(direction), chat_rowid \(direction)"
+        var binds = [String(maxMessage), String(maxChat)]
+        var continuation = ""
+        if let decoded, let lastChat = decoded.lastChatRowid {
+            // SQLite sorts NULL before integers. Match that order in the row-value comparison.
+            let comparison = order == .asc ? ">" : "<"
+            continuation = """
+                WHERE (normalized_seconds IS NOT NULL, COALESCE(normalized_seconds, 0),
+                       COALESCE(normalized_nanoseconds, 0), chat_rowid)
+                      \(comparison) (CAST(?3 AS INTEGER), CAST(?4 AS INTEGER), CAST(?5 AS INTEGER), CAST(?6 AS INTEGER))
+                """
+            binds += [decoded.lastSeconds == nil ? "0" : "1", String(decoded.lastSeconds ?? 0),
+                      String(decoded.lastNanoseconds ?? 0), String(lastChat)]
         }
-
         let sql = """
-            SELECT ROWID AS chat_rowid, chat_identifier, display_name, room_name, guid,
-                   service_name, group_id, style
-            FROM chat
-            WHERE ROWID <= ?1
+            WITH membership AS (
+                SELECT c.ROWID AS chat_rowid, m.ROWID AS message_rowid,
+                       CASE WHEN typeof(m.date) = 'integer' THEN m.date END AS date,
+                       \(ChatDB.normalizedSecondsSQL) AS normalized_seconds,
+                       \(ChatDB.normalizedNanosecondsSQL) AS normalized_nanoseconds
+                FROM chat c
+                JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+                JOIN message m ON m.ROWID = cmj.message_id
+                WHERE m.ROWID <= ?1 AND c.ROWID <= ?2
+            ), ranked AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY chat_rowid ORDER BY normalized_seconds DESC,
+                    normalized_nanoseconds DESC, message_rowid DESC
+                ) AS activity_rank FROM membership
+            ), chat_keys AS (
+                SELECT c.ROWID AS chat_rowid, r.date, r.normalized_seconds, r.normalized_nanoseconds
+                FROM chat c LEFT JOIN ranked r ON r.chat_rowid = c.ROWID AND r.activity_rank = 1
+                WHERE c.ROWID <= ?2
+            ), page_keys AS MATERIALIZED (
+                SELECT * FROM chat_keys \(continuation) ORDER BY \(ordering) LIMIT \(limit + 1)
+            ), visible_keys AS (
+                SELECT * FROM page_keys ORDER BY \(ordering) LIMIT \(limit)
+            )
+            SELECT v.*, c.chat_identifier, c.display_name, c.room_name, c.guid, c.service_name,
+                   c.group_id, c.style, (SELECT COUNT(*) FROM page_keys) AS page_count
+            FROM visible_keys v JOIN chat c ON c.ROWID = v.chat_rowid
+            ORDER BY \(ordering)
             """
-        let binds = [String(maxChat)]
         let rows = try reader.rows(sql, binds)
-        let participantMap = try exactChatParticipants(chatIds: rows.compactMap { $0.int("chat_rowid") })
-        var conversations: [ExactConversation] = rows.compactMap { row in
-            guard let chatID = row.int("chat_rowid") else { return nil }
-            let last = activity[chatID]
+        let chatIDs = try rows.map { try requiredPositiveRowid($0, "chat_rowid") }
+        let participantMap = try exactChatParticipants(chatIds: chatIDs)
+        let visible = zip(rows, chatIDs).map { row, chatID in
+            let rawDate = row.int("date")
             return ExactConversation(
                 chat_rowid: chatID,
-                chat_guid: row.text("guid"),
+                chat_guid: Self.storedText(row.values["guid"]).text,
                 chat_identifier: row.text("chat_identifier"),
                 display_name: row.text("display_name"),
                 room_name: row.text("room_name"),
@@ -1325,28 +1342,15 @@ public struct ChatDB {
                 group_id: row.text("group_id"),
                 style: row.int("style"),
                 is_group: row.int("style") == ChatDB.groupChatStyle,
-                last_activity: last?.raw.map(MessageTime.date(fromRaw:)),
-                last_activity_timestamp: last?.raw,
-                last_activity_normalized_seconds: last?.seconds,
-                last_activity_normalized_nanoseconds: last?.nanos,
+                last_activity: rawDate.map(MessageTime.date(fromRaw:)),
+                last_activity_timestamp: rawDate,
+                last_activity_normalized_seconds: row.int("normalized_seconds"),
+                last_activity_normalized_nanoseconds: row.int("normalized_nanoseconds"),
                 participants: participantMap[chatID] ?? []
             )
         }
-        conversations.sort { lhs, rhs in
-            exactCompare(lhs.last_activity_normalized_seconds, lhs.last_activity_normalized_nanoseconds,
-                         lhs.chat_rowid, rhs.last_activity_normalized_seconds,
-                         rhs.last_activity_normalized_nanoseconds, rhs.chat_rowid, order: order)
-        }
-        if let decoded, let lastChat = decoded.lastChatRowid {
-            conversations = conversations.filter {
-                exactCompare(decoded.lastSeconds, decoded.lastNanoseconds, lastChat,
-                             $0.last_activity_normalized_seconds, $0.last_activity_normalized_nanoseconds,
-                             $0.chat_rowid, order: order)
-            }
-        }
-        let page = Array(conversations.prefix(limit + 1))
-        let visible = Array(page.prefix(limit))
-        let next = try page.count > limit ? visible.last.map {
+        let pageCount = try rows.first.map { try requiredInt($0, "page_count") } ?? 0
+        let next = try pageCount > limit ? visible.last.map {
             try encodeCursor(ExactCursor(v: ChatDB.exactCursorVersion, op: "conversations",
                                          chatRowid: nil, chatGuid: nil, order: order.rawValue,
                                          maxMessageRowid: maxMessage, maxChatRowid: maxChat,
@@ -1361,6 +1365,7 @@ public struct ChatDB {
                                       order: ExactOrder, cursor: String?,
                                       includeNativeEditContext: Bool = false,
                                       includeNativeMentions: Bool = false) throws -> ExactPage<ExactMessage> {
+        try validateExactLimit(limit)
         let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let decoded = try decodeCursor(cursor, op: "history", chat: chat, order: order)
@@ -1371,10 +1376,17 @@ public struct ChatDB {
             maxMessage = try maxRowid(table: "message")
         }
         let orderSQL = order == .desc ? "DESC" : "ASC"
-        var sql = ChatDB.exactMessageSelect(schema: schema) + """
-
-        WHERE c.ROWID = ?1 AND m.ROWID <= ?2
-        """
+        let pageOrder = "normalized_seconds \(orderSQL), normalized_nanoseconds \(orderSQL), rowid \(orderSQL)"
+        // Only the visible page needs message bodies, handle fields and attachments.
+        var sql = """
+            SELECT m.ROWID AS rowid, \(ChatDB.normalizedSecondsSQL) AS normalized_seconds,
+                   \(ChatDB.normalizedNanosecondsSQL) AS normalized_nanoseconds
+            FROM chat c
+            JOIN message m ON m.ROWID IN (
+                SELECT message_id FROM chat_message_join WHERE chat_id = c.ROWID
+            )
+            WHERE c.ROWID = ?1 AND m.ROWID <= ?2
+            """
         var binds = [String(chat.rowid), String(maxMessage)]
         if let decoded, let lastMessage = decoded.lastMessageRowid {
             let lastSeconds = decoded.lastSeconds
@@ -1401,18 +1413,25 @@ public struct ChatDB {
                 }
             }
         }
-        let nullOrder = order == .desc ? "normalized_seconds IS NULL ASC" : "normalized_seconds IS NOT NULL ASC"
-        sql += """
-
-        ORDER BY \(nullOrder), normalized_seconds \(orderSQL), normalized_nanoseconds \(orderSQL), m.ROWID \(orderSQL)
-        LIMIT \(limit + 1)
-        """
-        let messages = try shapeExactMessages(rows: reader.rows(sql, binds), schema: schema,
-                                              includeNativeEditContext: includeNativeEditContext,
-                                              includeNativeMentions: includeNativeMentions,
-                                              enrichmentLimit: limit)
-        let visible = Array(messages.prefix(limit))
-        let next = try messages.count > limit ? visible.last.map {
+        let membership = """
+            JOIN visible_keys p ON c.ROWID = ?1
+            JOIN message m ON m.ROWID = p.rowid
+            """
+        let projection = ChatDB.exactMessageSelect(seconds: "p.normalized_seconds", nanos: "p.normalized_nanoseconds",
+                                                   membershipJoin: membership, schema: schema)
+        let pageSQL = """
+            WITH page_keys AS MATERIALIZED (\(sql) ORDER BY \(pageOrder) LIMIT \(limit + 1)),
+                 visible_keys AS (SELECT * FROM page_keys ORDER BY \(pageOrder) LIMIT \(limit))
+            SELECT payload.*, (SELECT COUNT(*) FROM page_keys) AS page_count
+            FROM (\(projection)) AS payload
+            ORDER BY \(pageOrder)
+            """
+        let rows = try reader.rows(pageSQL, binds)
+        let visible = try shapeExactMessages(rows: rows, schema: schema,
+                                             includeNativeEditContext: includeNativeEditContext,
+                                             includeNativeMentions: includeNativeMentions)
+        let pageCount = try rows.first.map { try requiredInt($0, "page_count") } ?? 0
+        let next = try pageCount > limit ? visible.last.map {
             try encodeCursor(ExactCursor(v: ChatDB.exactCursorVersion, op: "history",
                                          chatRowid: chat.rowid, chatGuid: chat.guid,
                                          order: order.rawValue, maxMessageRowid: maxMessage,
@@ -1441,18 +1460,26 @@ public struct ChatDB {
         let bind: String
         switch messageSelector {
         case .rowid(let rowid):
+            guard rowid > 0 else { throw AppleError.validation("message-rowid must be positive") }
             messagePredicate = "m.ROWID = ?2"
             bind = String(rowid)
         case .guid(let guid):
-            let rows = try reader.rows("SELECT ROWID FROM message WHERE guid = ?1", [guid])
+            let exactGUID = try validateOpaqueGUID(guid, name: "message-guid")
+            let rows = try reader.rows("""
+                SELECT ROWID AS rowid FROM message WHERE \(Self.exactSelectorGUIDPredicate) LIMIT 2
+                """, [exactGUID])
             guard !rows.isEmpty else { throw AppleError.notFound("message not found") }
             guard rows.count == 1 else {
                 throw AppleError.validation("message guid matches multiple rows; use --message-rowid")
             }
             messagePredicate = "m.ROWID = ?2"
-            bind = String(try requiredInt(rows[0], "ROWID"))
+            bind = String(try requiredInt(rows[0], "rowid"))
         }
-        let sql = ChatDB.exactMessageSelect(schema: schema) + """
+        let membership = """
+            JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+            JOIN message m ON m.ROWID = cmj.message_id
+            """
+        let sql = ChatDB.exactMessageSelect(membershipJoin: membership, schema: schema) + """
 
         WHERE c.ROWID = ?1 AND \(messagePredicate)
         LIMIT 1
@@ -2515,7 +2542,7 @@ public struct ChatDB {
             }
             let event = ExactReactionEvent(
                 rowid: row.int("rowid") ?? 0,
-                message_guid: row.text("message_guid"),
+                message_guid: Self.storedText(row.values["message_guid"]).text,
                 action: mapped.action,
                 associated_message_guid: associatedGUID,
                 reaction: mapped.value,
@@ -2667,76 +2694,49 @@ public struct ChatDB {
         return (chatIDs.count == 1 && chatIDs.contains(chatRowid), false)
     }
 
-    private func exactCompare(_ lhsSeconds: Int64?, _ lhsNanos: Int64?, _ lhsTie: Int64,
-                              _ rhsSeconds: Int64?, _ rhsNanos: Int64?, _ rhsTie: Int64,
-                              order: ExactOrder) -> Bool {
-        switch (lhsSeconds, rhsSeconds) {
-        case let (l?, r?) where l != r:
-            return order == .desc ? l > r : l < r
-        case (nil, _?) where order == .asc:
-            return true
-        case (_?, nil) where order == .asc:
-            return false
-        case (nil, _?) where order == .desc:
-            return false
-        case (_?, nil) where order == .desc:
-            return true
-        default:
-            if let lhsNanos, let rhsNanos, lhsNanos != rhsNanos {
-                return order == .desc ? lhsNanos > rhsNanos : lhsNanos < rhsNanos
-            }
-            return order == .desc ? lhsTie > rhsTie : lhsTie < rhsTie
-        }
-    }
-
     private mutating func shapeExactMessages(rows: [SQLiteReader.Row], schema: ExactReadSchema,
                                             includeNativeEditContext: Bool = false,
                                             includeNativeMentions: Bool = false,
-                                            enrichmentLimit: Int = 1, forNativeAction: Bool = false) throws -> [ExactMessage] {
-        let ids = rows.compactMap { $0.int("rowid") }
+                                            forNativeAction: Bool = false) throws -> [ExactMessage] {
+        let ids = try rows.map { try requiredPositiveRowid($0, "rowid") }
         let attachments = try strictAttachmentsByMessage(ids: ids)
         var out: [ExactMessage] = []
         var editBudget = NativeEditContextRead.Budget()
         var mentionBudget = NativeMentionsRead.Budget()
-        for (index, row) in rows.enumerated() {
-            let rowid = try requiredInt(row, "rowid")
-            let selectedChat = try requiredInt(row, "selected_chat_rowid")
+        for (row, rowid) in zip(rows, ids) {
+            let selectedChat = try requiredPositiveRowid(row, "selected_chat_rowid")
             let joined = attachments[rowid] ?? []
             let bodyInfo = exactBody(row, attachments: joined)
-            let mentionsRequested = includeNativeMentions && index < enrichmentLimit
-            if mentionsRequested { try Task.checkCancellation() }
+            if includeNativeMentions { try Task.checkCancellation() }
             let nativeDecoded = NativeMessageParts.decode(
                 row.data("attributedBody"),
-                collectMentions: NativeMentionsRead.shouldCollect(requested: mentionsRequested, budget: mentionBudget),
+                collectMentions: NativeMentionsRead.shouldCollect(requested: includeNativeMentions, budget: mentionBudget),
                 requireExactText: forNativeAction)
             let nativePartsInfo = exactNativeParts(nativeDecoded)
             let mentions = NativeMentionsRead.context(row.values["attributedBody"],
                                                       storageType: row.text("native_mentions_storage_type"),
                                                       decoded: nativeDecoded,
-                                                      requested: mentionsRequested, budget: &mentionBudget)
-            if mentionsRequested { try Task.checkCancellation() }
+                                                      requested: includeNativeMentions, budget: &mentionBudget)
+            if includeNativeMentions { try Task.checkCancellation() }
             let threadOriginator = Self.exactThreadOriginator(row, columnsAvailable: schema.threadOriginatorColumnsAvailable)
             let rawDate = row.int("date")
             let date = rawDate.map(MessageTime.date(fromRaw:))
             let isFromMe = (row.int("is_from_me") ?? 0) != 0
             let address = row.text("address")
             let sender = senderName(isFromMe: isFromMe, address: address)
-            var group: String?
-            if let room = row.text("cache_roomnames"),
-               let name = try exactDisplayNameForRoom(room), !name.isEmpty {
-                group = name
-            }
+            let isGroup = row.int("selected_style") == ChatDB.groupChatStyle
+            let groupName = row.text("selected_display_name").flatMap { $0.isEmpty ? nil : $0 }
             let editContext = try NativeEditContextRead.context(
-                row, requested: includeNativeEditContext && index < enrichmentLimit,
+                row, requested: includeNativeEditContext,
                 budget: &editBudget, read: { sql, binds in
                     try beforeNativeEditSummaryRead?()
                     return try reader.rows(sql, binds)
                 })
             out.append(ExactMessage(
                 rowid: rowid,
-                message_guid: row.text("message_guid"),
+                message_guid: Self.storedText(row.values["message_guid"]).text,
                 selected_chat_rowid: selectedChat,
-                chat_guid: row.text("chat_guid"),
+                chat_guid: Self.storedText(row.values["chat_guid"]).text,
                 chat_identifier: row.text("chat_identifier"),
                 date: date,
                 date_local: date.map(MessageTime.localString(from:)),
@@ -2749,9 +2749,9 @@ public struct ChatDB {
                 service: row.text("service"),
                 body: bodyInfo.body,
                 body_availability: bodyInfo.availability,
-                group_name: group,
+                group_name: isGroup ? groupName : nil,
                 hasDirectChatStyle: row.values["selected_style"] == .integer(ChatDB.directChatStyle),
-                is_group: row.int("selected_style") == ChatDB.groupChatStyle,
+                is_group: isGroup,
                 has_attachments: (row.int("cache_has_attachments") ?? 0) != 0 || !joined.isEmpty,
                 attachments: joined,
                 native_parts_available: nativePartsInfo.available,
@@ -2772,8 +2772,8 @@ public struct ChatDB {
             return ExactThreadOriginator(available: false, reason: "missing-schema",
                                          message_guid: nil, raw_part: nil, native_part: nil)
         }
-        let guid = originatorText(row.values["thread_originator_guid"])
-        let part = originatorText(row.values["thread_originator_part"])
+        let guid = storedText(row.values["thread_originator_guid"])
+        let part = storedText(row.values["thread_originator_part"])
         let hasGUID = guid.text?.isEmpty == false
         let hasPart = part.text?.isEmpty == false
         if guid.wrongType || part.wrongType {
@@ -2798,7 +2798,7 @@ public struct ChatDB {
                                      native_part: parsed.nativePart)
     }
 
-    private static func originatorText(_ value: SQLiteReader.Row.Value?) -> (text: String?, wrongType: Bool) {
+    private static func storedText(_ value: SQLiteReader.Row.Value?) -> (text: String?, wrongType: Bool) {
         switch value {
         case .text(let text)?: return (text, false)
         case .null?: return (nil, false)
@@ -2861,11 +2861,6 @@ public struct ChatDB {
         return (nil, ExactBodyAvailability(status: "empty", reason: "no text, attributedBody, or attachments"))
     }
 
-    private func exactDisplayNameForRoom(_ room: String) throws -> String? {
-        try reader.rows("SELECT display_name FROM chat WHERE room_name = ?1 LIMIT 1", [room])
-            .first?.text("display_name")
-    }
-
     private func strictAttachmentsByMessage(ids: [Int64]) throws -> [Int64: [Attachment]] {
         guard !ids.isEmpty else { return [:] }
         let columns = try requiredColumns("attachment", ["ROWID"])
@@ -2878,20 +2873,21 @@ public struct ChatDB {
         for chunk in ChatDB.idChunks(ids) {
             let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
             let sql = """
-                SELECT maj.message_id AS message_id, a.ROWID AS rowid,
+                SELECT m.ROWID AS message_id, a.ROWID AS rowid,
                        \(selectedColumns), \(NativeAttachmentFlagsDecoder.projection(columns: columns)),
                        \(NativeAttachmentTransferDecoder.projection(columns: columns))
-                FROM message_attachment_join maj
+                FROM message m
+                JOIN message_attachment_join maj ON maj.message_id = m.ROWID
                 JOIN attachment a ON a.ROWID = maj.attachment_id
-                WHERE maj.message_id IN (\(placeholders))
-                ORDER BY maj.message_id, a.ROWID
+                WHERE m.ROWID IN (\(placeholders))
+                ORDER BY m.ROWID, a.ROWID
                 """
             for row in try reader.rows(sql, chunk.map(String.init)) {
                 let raw = row.text("filename")
                 let resolved = attachmentPath(from: raw)
                 out[try requiredInt(row, "message_id"), default: []].append(Attachment(
                     rowid: try requiredInt(row, "rowid"),
-                    guid: row.text("guid"),
+                    guid: Self.storedText(row.values["guid"]).text,
                     filename: raw,
                     path: resolved.path,
                     exists: resolved.exists,
@@ -2915,11 +2911,12 @@ public struct ChatDB {
         for chunk in ChatDB.idChunks(chatIds) {
             let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
             let sql = """
-                SELECT chj.chat_id AS chat_id, h.id AS handle
-                FROM chat_handle_join chj
+                SELECT c.ROWID AS chat_id, h.id AS handle
+                FROM chat c
+                JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
                 JOIN handle h ON h.ROWID = chj.handle_id
-                WHERE chj.chat_id IN (\(placeholders))
-                ORDER BY chj.chat_id, h.ROWID
+                WHERE c.ROWID IN (\(placeholders))
+                ORDER BY c.ROWID, h.ROWID
                 """
             for row in try reader.rows(sql, chunk.map(String.init)) {
                 guard let handle = row.text("handle") else { continue }
@@ -2933,23 +2930,25 @@ public struct ChatDB {
         let rows: [SQLiteReader.Row]
         switch selector {
         case .rowid(let rowid):
+            guard rowid > 0 else { throw AppleError.validation("chat-rowid must be positive") }
             rows = try reader.rows("""
                 SELECT ROWID AS rowid, guid, chat_identifier, display_name, style
                 FROM chat WHERE ROWID = ?1
                 """, [String(rowid)])
         case .guid(let guid):
+            let exactGUID = try validateOpaqueGUID(guid, name: "chat-guid")
             rows = try reader.rows("""
                 SELECT ROWID AS rowid, guid, chat_identifier, display_name, style
-                FROM chat WHERE guid = ?1
-                """, [guid])
+                FROM chat WHERE \(Self.exactSelectorGUIDPredicate) LIMIT 2
+                """, [exactGUID])
         }
         guard !rows.isEmpty else { throw AppleError.notFound("conversation not found") }
         guard rows.count == 1 else {
             throw AppleError.validation("chat guid matches multiple rows; use --chat-rowid")
         }
         let row = rows[0]
-        return ResolvedExactChat(rowid: try requiredInt(row, "rowid"),
-                                 guid: row.text("guid"),
+        return ResolvedExactChat(rowid: try requiredPositiveRowid(row, "rowid"),
+                                 guid: Self.storedText(row.values["guid"]).text,
                                  identifier: row.text("chat_identifier"),
                                  displayName: row.text("display_name"),
                                  style: row.int("style"))
@@ -2978,9 +2977,28 @@ public struct ChatDB {
     }
 
     private func requiredColumns(_ table: String, _ required: Set<String>) throws -> Set<String> {
-        let rows = try reader.rows("PRAGMA table_info(\(table))")
-        let columns = Set(rows.compactMap { $0.text("name") })
-        guard !columns.isEmpty else { throw AppleError.upstream("Messages database is missing required table '\(table)'") }
+        let objects = try reader.rows("PRAGMA main.table_list(\(table))")
+        guard let object = objects.first else {
+            throw AppleError.upstream("Messages database is missing required table '\(table)'")
+        }
+        guard objects.count == 1, object.text("type") == "table" else {
+            throw AppleError.upstream("Messages database requires an ordinary table for '\(table)'")
+        }
+        let rows = try reader.rows("PRAGMA main.table_xinfo(\(table))")
+        var columns = Set(rows.filter { $0.int("hidden") == 0 }.compactMap { $0.text("name") })
+        if required.contains("ROWID") {
+            let invalid = AppleError.upstream("Messages database table '\(table)' has no usable native ROWID")
+            guard object.int("wr") == 0 else { throw invalid }
+            if let named = rows.first(where: { $0.text("name")?.lowercased() == "rowid" }) {
+                // INTEGER PRIMARY KEY DESC and composite keys use a separate primary-key index.
+                // Only a true integer rowid alias can identify the same record as native joins.
+                guard named.int("hidden") == 0, named.int("pk") == 1,
+                      named.text("type")?.uppercased() == "INTEGER" else { throw invalid }
+                let indexes = try reader.rows("PRAGMA main.index_list(\(table))")
+                guard !indexes.contains(where: { $0.text("origin") == "pk" }) else { throw invalid }
+            }
+            columns.insert("ROWID")
+        }
         let missing = required.subtracting(columns)
         guard missing.isEmpty else {
             throw AppleError.upstream("Messages database table '\(table)' is missing required column(s): \(missing.sorted().joined(separator: ", "))")
@@ -2989,8 +3007,16 @@ public struct ChatDB {
     }
 
     private func maxRowid(table: String) throws -> Int64 {
-        try reader.rows("SELECT COALESCE(MAX(ROWID), 0) AS max_rowid FROM \(table)")
+        try reader.rows("SELECT COALESCE(MAX(ROWID), 0) AS max_rowid FROM \(table) WHERE ROWID > 0")
             .first?.int("max_rowid") ?? 0
+    }
+
+    private func requiredPositiveRowid(_ row: SQLiteReader.Row, _ column: String) throws -> Int64 {
+        let id = try requiredStrictInteger(row, column)
+        guard id > 0 else {
+            throw AppleError.upstream("Messages database returned a nonpositive row ID for '\(column)'")
+        }
+        return id
     }
 
     private func requiredInt(_ row: SQLiteReader.Row, _ column: String) throws -> Int64 {
@@ -3009,10 +3035,10 @@ public struct ChatDB {
         guard let data = Data(base64Encoded: cursor) else {
             throw AppleError.validation("cursor must be base64-encoded JSON")
         }
-        try validateExactCursorJSONShape(data)
+        let normalized = try validatedExactCursorData(data)
         let decoded: ExactCursor
         do {
-            decoded = try JSONDecoder().decode(ExactCursor.self, from: data)
+            decoded = try JSONDecoder().decode(ExactCursor.self, from: normalized)
         } catch {
             throw AppleError.validation("cursor is malformed")
         }
@@ -3034,7 +3060,12 @@ public struct ChatDB {
                 throw AppleError.validation("cursor has an invalid range")
             }
             guard let chat else { throw AppleError.validation("cursor is missing conversation scope") }
-            guard decoded.chatRowid == chat.rowid, decoded.chatGuid == chat.guid else {
+            let sameGUID = switch (decoded.chatGuid, chat.guid) {
+            case let (stored?, current?): stored.utf8.elementsEqual(current.utf8)
+            case (nil, nil): true
+            default: false
+            }
+            guard decoded.chatRowid == chat.rowid, sameGUID else {
                 throw AppleError.validation("cursor is for a different conversation")
             }
         case "conversations":
@@ -3071,146 +3102,95 @@ public struct ChatDB {
         return encoded
     }
 
-    private func validateExactCursorJSONShape(_ data: Data) throws {
+    /// Foundation may round JSON decimals through Double when decoding an Int64.
+    /// Normalize numeric fields exactly before the typed decoder checks field types.
+    private func validatedExactCursorData(_ data: Data) throws -> Data {
         guard let text = String(data: data, encoding: .utf8) else {
             throw AppleError.validation("cursor is malformed")
         }
-        let keys = try topLevelJSONKeys(text)
-        let allowed = Set(ExactCursor.CodingKeys.allCases.map(\.stringValue))
-        var seen: Set<String> = []
-        for key in keys {
-            guard allowed.contains(key) else {
-                throw AppleError.validation("cursor contains an unknown field")
-            }
-            guard seen.insert(key).inserted else {
-                throw AppleError.validation("cursor contains a duplicate field")
-            }
-        }
-    }
-
-    private func topLevelJSONKeys(_ text: String) throws -> [String] {
         let bytes = Array(text.utf8)
         var index = 0
+        let malformed = AppleError.validation("cursor is malformed")
+        func whitespace(_ byte: UInt8) -> Bool {
+            byte == 32 || byte == 9 || byte == 10 || byte == 13
+        }
         func skipWhitespace() {
-            while index < bytes.count, [UInt8(ascii: " "), UInt8(ascii: "\n"), UInt8(ascii: "\r"), UInt8(ascii: "\t")].contains(bytes[index]) {
-                index += 1
-            }
+            while index < bytes.count && whitespace(bytes[index]) { index += 1 }
         }
-        func parseString() throws -> String {
-            guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else {
-                throw AppleError.validation("cursor is malformed")
-            }
-            index += 1
-            var out = Data()
-            while index < bytes.count {
-                let b = bytes[index]
-                index += 1
-                if b == UInt8(ascii: "\"") {
-                    return String(data: out, encoding: .utf8) ?? ""
-                }
-                if b == UInt8(ascii: "\\") {
-                    guard index < bytes.count else { throw AppleError.validation("cursor is malformed") }
-                    let escaped = bytes[index]
-                    index += 1
-                    switch escaped {
-                    case UInt8(ascii: "\""), UInt8(ascii: "\\"), UInt8(ascii: "/"):
-                        out.append(escaped)
-                    case UInt8(ascii: "b"):
-                        out.append(8)
-                    case UInt8(ascii: "f"):
-                        out.append(12)
-                    case UInt8(ascii: "n"):
-                        out.append(10)
-                    case UInt8(ascii: "r"):
-                        out.append(13)
-                    case UInt8(ascii: "t"):
-                        out.append(9)
-                    case UInt8(ascii: "u"):
-                        guard index + 4 <= bytes.count else { throw AppleError.validation("cursor is malformed") }
-                        let hex = bytes[index ..< index + 4]
-                        index += 4
-                        guard let scalar = UInt32(String(decoding: hex, as: UTF8.self), radix: 16),
-                              let unicode = UnicodeScalar(scalar) else {
-                            throw AppleError.validation("cursor is malformed")
-                        }
-                        out.append(contentsOf: String(unicode).utf8)
-                    default:
-                        throw AppleError.validation("cursor is malformed")
-                    }
-                } else {
-                    out.append(b)
-                }
-            }
-            throw AppleError.validation("cursor is malformed")
-        }
-        func skipValue() throws {
+        func take(_ token: UInt8) -> Bool {
             skipWhitespace()
-            guard index < bytes.count else { throw AppleError.validation("cursor is malformed") }
+            guard index < bytes.count, bytes[index] == token else { return false }
+            index += 1
+            return true
+        }
+        func stringRange() throws -> Range<Int> {
+            let start = index
+            guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else { throw malformed }
+            index += 1
+            while index < bytes.count {
+                let byte = bytes[index]
+                index += 1
+                if byte == UInt8(ascii: "\\") {
+                    guard index < bytes.count else { throw malformed }
+                    index += 1
+                } else if byte == UInt8(ascii: "\"") {
+                    return start..<index
+                }
+            }
+            throw malformed
+        }
+
+        let allowed = Set(ExactCursor.CodingKeys.allCases.map(\.stringValue))
+        var seen = Set<String>()
+        var normalized = Data()
+        var copied = 0
+        guard take(UInt8(ascii: "{")) else { throw malformed }
+        repeat {
+            skipWhitespace()
+            let name = try stringRange()
+            guard let key = try? JSONDecoder().decode(String.self, from: Data(bytes[name])) else { throw malformed }
+            guard allowed.contains(key) else { throw AppleError.validation("cursor contains an unknown field") }
+            guard seen.insert(key).inserted else { throw AppleError.validation("cursor contains a duplicate field") }
+            guard take(UInt8(ascii: ":")) else { throw malformed }
+            skipWhitespace()
+            guard index < bytes.count else { throw malformed }
             if bytes[index] == UInt8(ascii: "\"") {
-                _ = try parseString()
-                return
-            }
-            var depth = 0
-            var inString = false
-            var escaped = false
-            while index < bytes.count {
-                let b = bytes[index]
-                if inString {
-                    if escaped { escaped = false }
-                    else if b == UInt8(ascii: "\\") { escaped = true }
-                    else if b == UInt8(ascii: "\"") { inString = false }
-                    index += 1
-                    continue
+                _ = try stringRange()
+            } else {
+                let start = index
+                while index < bytes.count && !whitespace(bytes[index]) &&
+                    bytes[index] != UInt8(ascii: ",") && bytes[index] != UInt8(ascii: "}") { index += 1 }
+                let token = String(decoding: bytes[start..<index], as: UTF8.self)
+                if token != "null" {
+                    guard let value = Self.exactCursorInteger(token) else { throw malformed }
+                    normalized.append(contentsOf: bytes[copied..<start])
+                    normalized.append(contentsOf: String(value).utf8)
+                    copied = index
                 }
-                if b == UInt8(ascii: "\"") { inString = true; index += 1; continue }
-                if b == UInt8(ascii: "{") || b == UInt8(ascii: "[") { depth += 1; index += 1; continue }
-                if b == UInt8(ascii: "}") || b == UInt8(ascii: "]") {
-                    if depth == 0 { return }
-                    depth -= 1
-                    index += 1
-                    continue
-                }
-                if depth == 0 && b == UInt8(ascii: ",") { return }
-                index += 1
             }
-        }
+        } while take(UInt8(ascii: ","))
+        guard take(UInt8(ascii: "}")) else { throw malformed }
         skipWhitespace()
-        guard index < bytes.count, bytes[index] == UInt8(ascii: "{") else {
-            throw AppleError.validation("cursor is malformed")
+        guard index == bytes.count else { throw malformed }
+        normalized.append(contentsOf: bytes[copied...])
+        return normalized
+    }
+
+    private static func exactCursorInteger(_ token: String) -> Int64? {
+        guard let match = token.wholeMatch(of: #/(-?)(0|[1-9][0-9]*)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?/#) else {
+            return nil
         }
-        index += 1
-        var keys: [String] = []
-        skipWhitespace()
-        if index < bytes.count, bytes[index] == UInt8(ascii: "}") {
-            index += 1
-            skipWhitespace()
-            guard index == bytes.count else { throw AppleError.validation("cursor is malformed") }
-            return keys
-        }
-        while true {
-            skipWhitespace()
-            keys.append(try parseString())
-            skipWhitespace()
-            guard index < bytes.count, bytes[index] == UInt8(ascii: ":") else {
-                throw AppleError.validation("cursor is malformed")
-            }
-            index += 1
-            try skipValue()
-            skipWhitespace()
-            guard index < bytes.count else { throw AppleError.validation("cursor is malformed") }
-            if bytes[index] == UInt8(ascii: ",") {
-                index += 1
-                continue
-            }
-            if bytes[index] == UInt8(ascii: "}") {
-                index += 1
-                break
-            }
-            throw AppleError.validation("cursor is malformed")
-        }
-        skipWhitespace()
-        guard index == bytes.count else { throw AppleError.validation("cursor is malformed") }
-        return keys
+        let (_, sign, whole, fraction, exponent) = match.output
+        if fraction == nil && exponent == nil { return Int64(token) }
+        let digits = (String(whole) + (fraction.map(String.init) ?? "")).drop(while: { $0 == "0" })
+        if digits.isEmpty { return 0 }
+
+        // The cursor byte limit also bounds the largest meaningful decimal shift.
+        guard let power = Int(exponent ?? "0"), (-exactCursorMaxBytes...exactCursorMaxBytes).contains(power) else { return nil }
+        let integerDigits = digits.count + power - (fraction?.count ?? 0)
+        guard (1...19).contains(integerDigits), digits.dropFirst(integerDigits).allSatisfy({ $0 == "0" }) else { return nil }
+        let padding = String(repeating: "0", count: max(0, integerDigits - digits.count))
+        return Int64(String(sign) + digits.prefix(integerDigits) + padding)
     }
 
     // MARK: - iMessage availability (oracle `_check_imessage_availability`)

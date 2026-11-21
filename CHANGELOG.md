@@ -669,6 +669,24 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- Exact message reads use the selected conversation for group names and the
+  message row for attachment membership.
+- Conversation activity uses exact chat membership. Conversation and history pages
+  can return valid records before a later row containing invalid SQLite text.
+- Messages history now paginates past fractional or malformed timestamps.
+  These messages remain discoverable as undated rows in either sort order.
+- Messages history returns each message once per selected conversation when the
+  database contains repeated membership rows. Page sizes and cursors count distinct messages.
+- Messages exact lookups, history, and conversation discovery reject substituted membership views and row identifiers that could associate a message with the wrong conversation.
+- Messages pagination rejects altered cursor field names and accepts valid Unicode escapes in conversation GUIDs.
+  Cursor row IDs and timestamps keep their exact integer values, including above
+  2^53. Fractional values that would round to an integer now return a validation error.
+- The Swift Messages history and conversation APIs enforce the same 1–1000 page size as the CLI.
+- Exact Messages reads expose a GUID only when it is stored as text, so a numeric database value cannot point a caller to a different record.
+- Exact Messages lookups and history cursors now compare GUID bytes. Case,
+  trailing spaces and Unicode normalization can no longer select a different target.
+  A leading U+FEFF in a stored GUID now survives exact Messages reads and pagination.
+
 - Attachment reply verification preserves the distinction between SQL NULL and
   an empty BLOB. When the verifier needs a body field and finds an empty BLOB,
   it leaves the reply unverified.

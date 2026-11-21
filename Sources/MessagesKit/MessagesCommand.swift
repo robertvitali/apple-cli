@@ -667,7 +667,7 @@ private let exactReadDefaultLimit = 100
 private let exactReadMaxLimit = 1000
 private let exactGUIDMaxScalars = 2048
 
-private func validateExactLimit(_ limit: Int) throws {
+func validateExactLimit(_ limit: Int) throws {
     guard (1...exactReadMaxLimit).contains(limit) else {
         throw AppleError.validation("limit must be between 1 and \(exactReadMaxLimit)")
     }
@@ -680,7 +680,7 @@ private func parseExactOrder(_ value: String) throws -> ChatDB.ExactOrder {
     return order
 }
 
-private func validateOpaqueGUID(_ value: String, name: String) throws -> String {
+func validateOpaqueGUID(_ value: String, name: String) throws -> String {
     guard !value.isEmpty else { throw AppleError.validation("\(name) cannot be empty") }
     guard value.unicodeScalars.count <= exactGUIDMaxScalars else {
         throw AppleError.validation("\(name) too long (max \(exactGUIDMaxScalars) code points)")

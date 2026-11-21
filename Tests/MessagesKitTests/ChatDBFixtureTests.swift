@@ -924,6 +924,50 @@ struct ChatDBFixtureTests {
         }
     }
 
+    @Test func exactSelectorsRefuseDifferentBytesUnderPermissiveCollations() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            ALTER TABLE chat RENAME COLUMN guid TO original_guid;
+            ALTER TABLE chat ADD COLUMN guid TEXT COLLATE NOCASE;
+            UPDATE chat SET guid=original_guid;
+            ALTER TABLE message RENAME COLUMN guid TO original_guid;
+            ALTER TABLE message ADD COLUMN guid TEXT COLLATE RTRIM;
+            UPDATE message SET guid=original_guid;
+            """)
+        var db = try makeDB(fx, book: friendBook)
+        let chat = "iMessage;-;+12125550100"
+        let (found, message) = try db.exactGet(chat: .guid(chat), message: .guid("g1"))
+        #expect(found.rowid == 3 && message.rowid == 1)
+        #expect {
+            try db.exactHistory(chat: .guid(chat.uppercased()), limit: 1, order: .desc, cursor: nil)
+        } throws: { ($0 as? AppleError)?.type == AppleErrorType.notFound }
+        #expect {
+            try db.exactGet(chat: .rowid(3), message: .guid("g1 "))
+        } throws: { ($0 as? AppleError)?.type == AppleErrorType.notFound }
+        #expect {
+            try db.exactReactionInspect(chat: .guid(chat.uppercased()), message: .guid("g1"))
+        } throws: { ($0 as? AppleError)?.type == AppleErrorType.notFound }
+        #expect {
+            try db.exactGet(chat: .guid(chat + "\0suffix"), message: .rowid(1))
+        } throws: { ($0 as? AppleError)?.type == AppleErrorType.validation }
+        #expect {
+            try db.exactGet(chat: .rowid(3), message: .guid("g1\0suffix"))
+        } throws: { ($0 as? AppleError)?.type == AppleErrorType.validation }
+    }
+
+    @Test func historyCursorRefusesByteDistinctChatGUIDAtSameRowid() throws {
+        let fx = try ChatFixture()
+        try fx.exec("UPDATE chat SET guid='iMessage;-;caf\u{e9}' WHERE ROWID=3")
+        var db = try makeDB(fx, book: friendBook)
+        let first = try db.exactHistory(chat: .rowid(3), limit: 1, order: .asc, cursor: nil)
+        let cursor = try #require(first.nextCursor)
+        try fx.exec("UPDATE chat SET guid='iMessage;-;cafe\u{301}' WHERE ROWID=3")
+        var reopened = try makeDB(fx, book: friendBook)
+        #expect {
+            try reopened.exactHistory(chat: .rowid(3), limit: 1, order: .asc, cursor: cursor)
+        } throws: { ($0 as? AppleError)?.message == "cursor is for a different conversation" }
+    }
+
     @Test func exactReadsRejectDuplicateGUIDsInsteadOfPickingFirstRow() throws {
         let fx = try ChatFixture()
         try fx.exec("""
@@ -964,6 +1008,36 @@ struct ChatDBFixtureTests {
             .items.filter { $0.body == "identical synthetic body" }.map(\.rowid) == [20])
         #expect(try db.exactHistory(chat: .rowid(1), limit: 100, order: .desc, cursor: nil)
             .items.filter { $0.body == "identical synthetic body" }.map(\.rowid) == [21])
+    }
+
+    @Test func exactReadsKeepDistinctStoredGUIDsAndRejectReboundCursor() throws {
+        let fx = try ChatFixture()
+        var original = try makeDB(fx, book: friendBook)
+        let page = try original.exactHistory(chat: .rowid(3), limit: 1, order: .asc, cursor: nil)
+        let cursor = try #require(page.nextCursor)
+        let markedChat = "\u{feff}iMessage;-;+12125550100"
+        let markedMessage = "\u{feff}g2"
+        try fx.exec("""
+            UPDATE chat SET guid='\(markedChat)' WHERE ROWID=3;
+            UPDATE message SET guid='\(markedMessage)' WHERE ROWID=1;
+            """)
+        var current = try makeDB(fx, book: friendBook)
+        let (chat, first) = try current.exactGet(chat: .rowid(3), message: .rowid(1))
+        let (_, second) = try current.exactGet(chat: .rowid(3), message: .guid("g2"))
+        #expect(chat.guid == markedChat)
+        #expect(first.message_guid == markedMessage)
+        #expect(second.rowid == 2 && second.message_guid == "g2")
+        #expect(throws: AppleError.self) {
+            try current.exactHistory(chat: .rowid(3), limit: 1, order: .asc, cursor: cursor)
+        }
+
+        let all = try current.exactHistory(chat: .rowid(3), limit: 100, order: .asc, cursor: nil)
+        let marked = try current.exactHistory(chat: .rowid(3), limit: 1, order: .asc, cursor: nil)
+        let markedCursor = try #require(marked.nextCursor)
+        let rest = try current.exactHistory(chat: .rowid(3), limit: 100, order: .asc, cursor: markedCursor)
+        #expect(marked.items.count == 1 && !rest.items.isEmpty)
+        #expect((marked.items + rest.items).map(\.rowid) == all.items.map(\.rowid))
+        #expect(rest.nextCursor == nil)
     }
 
     @Test func exactHistoryKeepsBodylessAndUndecodableRowsHonest() throws {

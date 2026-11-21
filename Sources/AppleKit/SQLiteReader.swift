@@ -640,7 +640,11 @@ public final class SQLiteReader {
                         guard let text = String(data: bytes, encoding: .utf8) else {
                             throw DBError.step("text column contains invalid UTF-8")
                         }
-                        values[name] = .text(text)
+                        // Foundation can consume a leading U+FEFF as a file marker.
+                        // SQLite TEXT stores that scalar literally. Decode the validated
+                        // bytes directly in this case to preserve the complete stored value.
+                        let stored = bytes.starts(with: "\u{feff}".utf8) ? String(decoding: bytes, as: UTF8.self) : text
+                        values[name] = .text(stored)
                     } else { values[name] = .null }
                 case SQLITE_BLOB:
                     // SQLite may return a nil pointer for a BLOB of length zero.

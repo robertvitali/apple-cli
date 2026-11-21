@@ -114,7 +114,9 @@ encodings remain undecodable rather than invoking an unsafe fallback.
 
 Pagination uses deterministic keysets with a tie-breaking ROWID, versioned cursors
 bound to operation, selected conversation, filters and ordering. Validate cursor
-size, shape and scope. Capture an insertion upper bound on the first page and use
+size, shape and scope. Returned chat and message ROWIDs must be positive, so
+they can be used as selectors and cursor positions. Report a database error if a
+visible row or selected GUID resolves to an invalid locator. Capture an insertion upper bound on the first page and use
 it on later pages. Each invocation reads a fresh snapshot: edits/deletions are
 visible and snapshot cost is not bounded by the output limit. Normalize supported
 Apple timestamp encodings before ordering, with synthetic mixed-encoding tests.

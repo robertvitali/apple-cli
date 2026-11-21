@@ -571,8 +571,10 @@ They do not change the named-only `chats` listing or the legacy `recent` and
 
 Paged reads default to 100 results and accept 1–1000. Cursors bind the operation,
 resolved conversation where applicable, ordering and insertion upper bounds.
-Message ROWID bounds exclude subsequent inserts even when backdated; discovery
-also bounds chat ROWIDs and calculates activity within the message bound.
+Later pages exclude message ROWIDs above the initial maximum, including backdated
+inserts. Discovery also bounds chat ROWIDs and calculates activity within the
+message bound. On schemas that reuse a deleted ROWID, a replacement within the
+bound can appear in a later snapshot.
 Every invocation reads a fresh database snapshot, so edits, deletions and changed
 memberships can affect later pages. This is neither a frozen multi-invocation
 snapshot nor an event replay contract. The output limit does not bound snapshot
