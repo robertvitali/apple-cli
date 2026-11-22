@@ -566,6 +566,32 @@ struct MessagesReactionAXAutomationTests {
             [customChooserCGWindowInfo(bounds: customChooserCGWindowBounds(height: 561))] as CFArray, pid: 123).isEmpty)
     }
 
+    @Test func navigationAndHandoffRefuseAnInactiveConsoleSession() throws {
+        let onConsole = kCGSessionOnConsoleKey as String
+        let loginDone = kCGSessionLoginDoneKey as String
+        let active = [onConsole: true, loginDone: true]
+        try checkMessagesAXSession(active as NSDictionary)
+        try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(active as NSDictionary)
+
+        for key in [onConsole, loginDone] {
+            var inactive = active
+            inactive[key] = false
+            #expect(throws: MessagesAXNavigationError.targetDrift) {
+                try checkMessagesAXSession(inactive as NSDictionary)
+            }
+            #expect(throws: MessagesReactionAXError.targetDrift) {
+                try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(inactive as NSDictionary)
+            }
+            let malformed = [key: NSNumber(value: 1)]
+            #expect(throws: MessagesAXNavigationError.unknownAXValue) {
+                try checkMessagesAXSession(malformed as NSDictionary)
+            }
+            #expect(throws: MessagesReactionAXError.unknownAXValue) {
+                try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(malformed as NSDictionary)
+            }
+        }
+    }
+
     @Test func navigationChecksTheSessionEvenWithoutAnExistingWindow() throws {
         try LiveMessagesReactionAXDriver.checkSessionBeforeOpen([:])
         try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(["CGSSessionScreenIsLocked": false])

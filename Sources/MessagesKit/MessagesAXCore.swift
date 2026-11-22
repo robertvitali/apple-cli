@@ -218,13 +218,20 @@ enum MessagesAXRetainedRouteDiscovery {
     case unavailable(MessagesAXRouteDriftReason)
 }
 
-/// An unlocked console may omit the lock flag. Missing or ill-typed session
-/// evidence cannot authorize a handoff. Process and window checks still apply.
+/// Quartz can omit session flags. When present, each flag must describe
+/// a logged-in, unlocked session on the console before a UI handoff.
 func checkMessagesAXSession(_ session: NSDictionary?) throws(MessagesAXNavigationError) {
     guard let session else { throw .unknownAXValue }
-    guard let value = session["CGSSessionScreenIsLocked"] else { return }
-    guard let flag = value as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { throw .unknownAXValue }
-    guard !flag.boolValue else { throw .targetDrift }
+    func require(_ key: String, whenPresent expected: Bool) throws(MessagesAXNavigationError) {
+        guard let value = session[key] else { return }
+        guard let flag = value as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else {
+            throw .unknownAXValue
+        }
+        guard flag.boolValue == expected else { throw .targetDrift }
+    }
+    try require("CGSSessionScreenIsLocked", whenPresent: false)
+    try require(kCGSessionOnConsoleKey as String, whenPresent: true)
+    try require(kCGSessionLoginDoneKey as String, whenPresent: true)
 }
 
 func checkMessagesAXDeadline(_ deadline: WorkerDeadline) throws {

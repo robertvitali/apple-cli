@@ -673,6 +673,8 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- Messages UI actions stop when macOS reports that the session is off the console or login is incomplete.
+
 - `apple messages automation status --text` includes the pending operation ID, type and handoff phase.
 
 - Exact message reads use the selected conversation for group names and the
