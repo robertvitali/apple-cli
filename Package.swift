@@ -31,7 +31,8 @@ let package = Package(
         .target(name: "EventKitCore", dependencies: ["AppleKit"]),
 
         // Per-domain command trees, composed and maintained together on main.
-        .target(name: "MessagesKit", dependencies: ["AppleKit", argparse]),
+        .target(name: "EventJournal", linkerSettings: [.linkedLibrary("sqlite3")]),
+        .target(name: "MessagesKit", dependencies: ["AppleKit", argparse, "EventJournal"]),
         .target(name: "MailKit", dependencies: ["AppleKit", argparse]),
         .target(name: "ContactsKit", dependencies: ["AppleKit", argparse]),
         .target(name: "NotesKit", dependencies: ["AppleKit", argparse]),

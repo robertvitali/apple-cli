@@ -38,12 +38,11 @@ extension MessageEventFilter {
                 }
                 let member = Data(bytes[offset..<(offset + length)])
                 offset += length
-                guard let value = String(data: member, encoding: .utf8),
-                      let identifier = try? MessageEventGUID(value), identifier.bytes == member,
+                guard let identifier = try? MessageEventGUID(storedBytes: member),
                       previous.map({ $0.lexicographicallyPrecedes(member) }) ?? true else {
                     throw PersistedEventMetadataFailure.invalidFilter
                 }
-                values.append(value)
+                values.append(identifier.rawValue)
                 previous = member
             }
         }

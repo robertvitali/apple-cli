@@ -530,3 +530,49 @@ assert os.path.basename(path) == "apple-cli-test.txt" and os.path.samefile(path,
   echo "$output" | grep -q '\^\[\[31mRED'
   ! printf '%s' "$output" | grep -q "$(printf '\033')"
 }
+
+@test "event stream retirement preview ignores a Foundation home override" {
+  local decoy="$BATS_TEST_TMPDIR/decoy"
+  local registry="$decoy/.apple-cli-messages-events"
+  local stream
+  stream=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  mkdir -m 700 "$decoy" "$registry"
+  mkdir -m 700 "$registry/.creating-$stream"
+  touch "$registry/registry.lock"
+  chmod 600 "$registry/registry.lock"
+
+  run env CFFIXED_USER_HOME="$decoy" "$BIN" messages event-streams retire "$stream" --dry-run
+  [ "$status" -ne 0 ]
+  python3 -c 'import json,sys; row=json.loads(sys.argv[1]); assert row["tool"]=="messages" and not row["ok"] and row["error"]["message"] in {"streamUnavailable","streamBusy","streamRegistryUnavailable"}' "$output"
+  [ -d "$registry/.creating-$stream" ]
+}
+
+stream_preview_with_readonly_output() {
+  "$BIN" messages event-streams retire "$1" --dry-run 1<"$2"
+}
+
+@test "event stream retirement checks the output descriptor before accessing the journal" {
+  local stream marker="$BATS_TEST_TMPDIR/readonly"
+  stream=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  printf '%s\n' sentinel > "$marker"
+  run stream_preview_with_readonly_output "$stream" "$marker"
+  [ "$status" -eq 70 ]
+  [ "$output" = "Messages event stream output: invalidDescriptor" ]
+  [ "$(cat "$marker")" = sentinel ]
+
+  python3 - "$BIN" "$stream" <<'PYTHON'
+import os
+import subprocess
+import sys
+
+binary, stream = sys.argv[1:]
+reader, writer = os.pipe()
+os.close(reader)
+try:
+    result = subprocess.run([binary, "messages", "event-streams", "retire", stream, "--dry-run"],
+                            stdout=writer, stderr=subprocess.PIPE, timeout=5)
+finally:
+    os.close(writer)
+assert result.returncode == 70 and result.stderr.strip() == b"Messages event stream output: outputClosed"
+PYTHON
+}

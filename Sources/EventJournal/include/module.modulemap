@@ -1,0 +1,4 @@
+module EventJournal {
+    header "EventJournal.h"
+    export *
+}

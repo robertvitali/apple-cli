@@ -25,6 +25,16 @@ struct MessageEventGUID: Hashable, Sendable {
         bytes = Data(value.utf8)
     }
 
+    /// Database and journal identities are raw UTF-8, including any leading scalar.
+    init(storedBytes: Data) throws {
+        guard (1...1_024).contains(storedBytes.count),
+              let value = String(data: storedBytes, encoding: .utf8),
+              value.utf8.elementsEqual(storedBytes) else {
+            throw MessageEventCursorFailure.invalidIdentifier
+        }
+        try self.init(value)
+    }
+
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.bytes == rhs.bytes }
     func hash(into hasher: inout Hasher) { hasher.combine(bytes) }
 }
@@ -47,18 +57,25 @@ struct MessageEventFilter: Equatable, Sendable {
     /// nil means all conversations; a selected scope is always nonempty and byte-sorted.
     let conversations: [MessageEventGUID]?
 
+    /// Every event cursor in a stream uses this same immutable filter identity.
+    let digest: MessageEventFilterDigest
+
     init(conversations values: [String]?) throws {
-        guard let values else { conversations = nil; return }
-        // Count precedes member validation; duplicates do not bypass the input budget.
-        guard (1...256).contains(values.count) else { throw MessageEventCursorFailure.invalidFilter }
-        let validated = try values.map(MessageEventGUID.init)
-        conversations = Set(validated).sorted { $0.bytes.lexicographicallyPrecedes($1.bytes) }
+        if let values {
+            // Count precedes member validation; duplicates do not bypass the input budget.
+            guard (1...256).contains(values.count) else { throw MessageEventCursorFailure.invalidFilter }
+            let validated = try values.map(MessageEventGUID.init)
+            conversations = Set(validated).sorted { $0.bytes.lexicographicallyPrecedes($1.bytes) }
+        } else {
+            conversations = nil
+        }
+        digest = MessageEventFilterDigest(hashing: Self.encode(conversations))
     }
 
-    var digest: MessageEventFilterDigest { MessageEventFilterDigest(hashing: canonicalBytes) }
+    var canonicalBytes: Data { Self.encode(conversations) }
 
     /// Version, scope, BE32 count, then BE32 byte length and exact UTF-8 per member.
-    var canonicalBytes: Data {
+    private static func encode(_ conversations: [MessageEventGUID]?) -> Data {
         var result = Data([1, conversations == nil ? 0 : 1])
         func appendCount(_ count: Int) {
             let value = UInt32(count)

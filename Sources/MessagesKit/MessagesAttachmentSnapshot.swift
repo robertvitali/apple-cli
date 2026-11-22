@@ -81,7 +81,7 @@ enum MessagesAttachmentSnapshot {
                               required: Set<String>, optional: Set<String> = [],
                               usesRowid: Bool = true, unsupported: any Error) throws -> Set<String> {
         var ordinary = false
-        try scope.forEachRow("SELECT type, rootpage FROM sqlite_schema WHERE name=?1 COLLATE NOCASE", [table]) { row in
+        try scope.forEachRow("SELECT type, rootpage FROM main.sqlite_schema WHERE type IN ('table','view') AND name=?1 COLLATE NOCASE", [table]) { row in
             guard !ordinary, case .text("table")? = row.values["type"],
                   case .integer(let root)? = row.values["rootpage"], root > 0 else { throw unsupported }
             ordinary = true

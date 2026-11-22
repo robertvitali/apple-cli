@@ -20,6 +20,20 @@ public final class FileHandleOutputSink: OutputSink, @unchecked Sendable {
             try? handle.write(contentsOf: data)
         }
     }
+
+    @discardableResult
+    func writeRecord(_ data: Data, deadline: ContinuousClock.Instant) -> Bool {
+        lock.withLock {
+            do {
+                let writer = try RecordWriter(borrowing: handle.fileDescriptor)
+                try writer.writeRecord(data, deadline: deadline)
+                try writer.close()
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
 }
 
 /// A lock-protected sink for deterministic command tests.

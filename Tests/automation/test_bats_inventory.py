@@ -37,7 +37,7 @@ EXPECTED_FILES = {
         "bats/local/contacts.bats": 7,
         "bats/local/mail.bats": 113,
         "bats/local/mail-move-gmail.bats": 2,
-        "bats/local/messages.bats": 36,
+        "bats/local/messages.bats": 38,
         "bats/local/notes.bats": 5,
         "bats/local/reminders.bats": 1,
         "bats/local/smoke.bats": 3,
@@ -335,10 +335,10 @@ class BatsInventoryTests(unittest.TestCase):
         manifest = checker.load_manifest(MANIFEST_PATH)
 
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["test_count"], 482)
+        self.assertEqual(manifest["test_count"], 484)
         self.assertEqual(
             {tier: manifest["tiers"][tier]["test_count"] for tier in ("hosted", "local")},
-            {"hosted": 315, "local": 167},
+            {"hosted": 315, "local": 169},
         )
         self.assertEqual(
             {
@@ -356,8 +356,12 @@ class BatsInventoryTests(unittest.TestCase):
             if entry["path"] == "bats/local/messages.bats"
         )
         self.assertEqual(
-            local_messages["ordered_title_sha256"][-1],
-            title_digest("messages send --dry-run --text neutralizes ANSI (Q12 [17])"),
+            local_messages["ordered_title_sha256"][-3:],
+            [
+                title_digest("messages send --dry-run --text neutralizes ANSI (Q12 [17])"),
+                title_digest("event stream retirement preview ignores a Foundation home override"),
+                title_digest("event stream retirement checks the output descriptor before accessing the journal"),
+            ],
         )
         moved_mail_titles = (
             "mail: sandbox:true is carried by rules-preview and trash-empty envelopes too (no forgotten emit site)",

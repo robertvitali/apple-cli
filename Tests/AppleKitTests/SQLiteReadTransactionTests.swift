@@ -22,6 +22,158 @@ struct SQLiteReadTransactionTests {
         return (url, handle)
     }
 
+    @Test(arguments: [512, 4096, 65_536])
+    func pageCacheTargetUsesTheSourcePageSizeAndPreservesSmallerSettings(pageSize: Int) throws {
+        var raw: OpaquePointer?
+        try #require(sqlite3_open(":memory:", &raw) == SQLITE_OK)
+        let db = try #require(raw)
+        defer { #expect(sqlite3_close(db) == SQLITE_OK) }
+        func execute(_ sql: String) throws { try #require(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK) }
+        func currentSetting() throws -> Int {
+            var row: OpaquePointer?
+            defer { sqlite3_finalize(row) }
+            try #require(sqlite3_prepare_v2(db, "PRAGMA main.cache_size", -1, &row, nil) == SQLITE_OK)
+            try #require(sqlite3_step(row) == SQLITE_ROW)
+            return Int(sqlite3_column_int64(row, 0))
+        }
+        try execute("PRAGMA main.page_size=\(pageSize)")
+        try execute("CREATE TABLE sample(id)")
+        for target: Int32 in [1, 512, 2048] {
+            var budgets = generous
+            budgets.pageCacheKiB = target
+            let pages = Int(target) * 1024 / pageSize
+            for setting in [0, pages, pages + 1, -Int(target), -Int(target) - 1] {
+                try execute("PRAGMA main.cache_size=\(setting)")
+                let scope = try SQLiteReadTransaction(limits: budgets, isCancelled: { false })
+                try scope.run(on: db) { _ in }
+                let expected = setting > pages || setting < -Int(target) ? -Int(target) : setting
+                #expect(try currentSetting() == expected)
+            }
+        }
+        try execute("PRAGMA main.cache_size=100000")
+        let ordinary = try SQLiteReadTransaction(limits: generous, isCancelled: { false })
+        try ordinary.run(on: db) { _ in }
+        #expect(try currentSetting() == 100000)
+        var invalid = generous
+        invalid.pageCacheKiB = 0
+        #expect(throws: Failure.invalidLimits) { try SQLiteReadTransaction(limits: invalid, isCancelled: { false }) }
+    }
+
+    @Test func fullScanBudgetAccumulatesAcrossQueriesAndAllowsIndexedReads() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        var limits = generous
+        limits.fullScanSteps = 2
+        var reads = 0
+        #expect(throws: Failure.fullScanLimit) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { db in
+                for _ in 0..<2 {
+                    try db.forEachRow("SELECT value FROM sample ORDER BY rowid") { _ in reads += 1 }
+                }
+                try db.forEachRow("SELECT value FROM sample WHERE rowid=1") { _ in reads += 1 }
+                // No matching row; the final step still charges its full scan.
+                try db.forEachRow("SELECT value FROM sample WHERE value=99") { _ in Issue.record("unexpected result") }
+            }
+        }
+        #expect(reads == 5)
+        limits.fullScanSteps = -1
+        #expect(throws: Failure.invalidLimits) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in }
+        }
+    }
+
+    @Test func snapshotSchemaLimitChecksTheLastPartialBatch() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        var limits = generous
+        limits.snapshotSchemaBytes = 1
+        #expect(throws: Failure.snapshotSetupLimit) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in
+                Issue.record("oversized schema admitted")
+            }
+        }
+        limits.snapshotSchemaBytes = 1 << 20
+        try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { db in
+            try db.forEachRow("SELECT value FROM sample") { _ in }
+        }
+        limits.snapshotSchemaBytes = 0
+        #expect(throws: Failure.invalidLimits) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in }
+        }
+    }
+
+    @Test func snapshotSchemaLimitInterruptsLoadingBeforeALaterWideTable() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        for index in 0..<64 {
+            try #require(sqlite3_exec(writer, "CREATE VIEW view_\(index) AS SELECT 1", nil, nil, nil) == SQLITE_OK)
+        }
+        // The fixture writer allows the wide table. The bounded reader permits only 128 columns.
+        let columns = (0..<129).map { "c" + String($0) }.joined(separator: ",")
+        try #require(sqlite3_exec(writer, "CREATE TABLE wide(\(columns))", nil, nil, nil) == SQLITE_OK)
+        #expect(throws: Failure.database(SQLITE_CORRUPT)) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: generous) { _ in
+                Issue.record("wide table accepted")
+            }
+        }
+        var limits = generous
+        limits.snapshotSchemaBytes = 1
+        #expect(throws: Failure.snapshotSetupLimit) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in
+                Issue.record("catalog passed the first footprint check")
+            }
+        }
+    }
+
+    @Test func setupCacheBudgetIsIndependentOfSchemaAndRowBudgets() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        var limits = generous
+        limits.snapshotCacheBytes = 1
+        #expect(throws: Failure.snapshotSetupLimit) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in
+                Issue.record("caller ran after setup exceeded its cache budget")
+            }
+        }
+        limits.snapshotCacheBytes = 0
+        #expect(throws: Failure.invalidLimits) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in }
+        }
+        limits.snapshotCacheBytes = nil
+        try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { db in
+            var count = 0
+            try db.forEachRow("SELECT value FROM sample") { _ in count += 1 }
+            #expect(count == 2)
+        }
+    }
+
+    @Test func snapshotSetupBudgetEndsBeforeCallerQueries() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        var limits = generous
+        // One ordinary schema object and one result from the snapshot pin.
+        limits.snapshotSetupRows = 2
+        var values: [Int64] = []
+        try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { db in
+            for _ in 0..<3 {
+                try db.forEachRow("SELECT value FROM sample ORDER BY rowid") { row in
+                    values.append(try #require(row.int("value")))
+                }
+            }
+        }
+        #expect(values == [1, 2, 1, 2, 1, 2])
+        limits.snapshotSetupRows = 1
+        #expect(throws: Failure.snapshotSetupLimit) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in
+                Issue.record("snapshot budget allowed caller queries")
+            }
+        }
+        limits.snapshotSetupRows = 0
+        #expect(throws: Failure.invalidLimits) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { _ in }
+        }
+    }
+
     @Test("all queries see the pinned WAL snapshot while another connection commits")
     func coherentSnapshot() throws {
         let (url, writer) = try database()
@@ -52,6 +204,49 @@ struct SQLiteReadTransactionTests {
         }
         #expect(observed?.values == ["t": .text(bound), "b": .blob(Data()), "n": .null,
                                     "i": .integer(7), "r": .real(1.5)])
+    }
+
+    @Test(arguments: ["UTF-8", "UTF-16le", "UTF-16be"])
+    func textBudgetsUseConvertedByteLength(_ encoding: String) throws {
+        let url = try scratch.directory().appendingPathComponent("encoded.sqlite")
+        var writer: OpaquePointer?
+        try #require(sqlite3_open(url.path, &writer) == SQLITE_OK)
+        defer { sqlite3_close(writer) }
+        let content = "\u{feff}" + String(repeating: "界", count: 200)
+        try #require(sqlite3_exec(writer, """
+            PRAGMA encoding='\(encoding)';
+            CREATE TABLE sample(value TEXT);
+            INSERT INTO sample VALUES(''),('\(content)');
+            """, nil, nil, nil) == SQLITE_OK)
+        for budget in [content.utf8.count - 1, content.utf8.count] {
+            var values: [String] = []
+            let result = Result {
+                try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: .init(
+                    timeout: 5, rows: 2, bytes: budget, valueBytes: budget)) { scope in
+                    try scope.forEachRow("SELECT value AS t, X'' AS b FROM sample ORDER BY rowid") { row in
+                        #expect(row.values["b"] == .blob(Data()))
+                        values.append(try #require(row.text("t")))
+                    }
+                }
+            }
+            if budget == content.utf8.count {
+                try result.get()
+                #expect(values == ["", content])
+            } else {
+                #expect(throws: Failure.valueLimit) { try result.get() }
+                #expect(values == [""])
+            }
+        }
+        let markers = ["", "\u{feff}", "\u{feff}A\0e\u{301}", "\u{feff}\u{feff}"]
+        try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: generous) { scope in
+            for marker in markers {
+                var bytes: [UInt8]?
+                try scope.forEachRow("SELECT ? AS marker", [marker]) { row in
+                    bytes = Array(try #require(row.text("marker")).utf8)
+                }
+                #expect(bytes == Array(marker.utf8))
+            }
+        }
     }
 
     @Test("invalid UTF-8 is rejected rather than repaired")
@@ -175,6 +370,29 @@ struct SQLiteReadTransactionTests {
             .rows("SELECT count(*) AS n FROM sample").first?.int("n") == 2)
     }
 
+    @Test func unlikelyHintIsLimitedToDirectQueriesWhenEnabled() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        try #require(sqlite3_exec(writer, "CREATE VIEW hinted AS SELECT unlikely(value=2) AS n FROM sample",
+                                 nil, nil, nil) == SQLITE_OK)
+        var limits = generous
+        limits.allowsUnlikelyHint = true
+        try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { db in
+            var values: [SQLiteReader.Row.Value?] = []
+            try db.forEachRow("SELECT unlikely(value=2) AS n FROM sample ORDER BY rowid") {
+                values.append($0.values["n"])
+            }
+            #expect(values == [.integer(0), .integer(1)])
+        }
+        for sql in ["SELECT n FROM hinted", "SELECT likely(1)", "SELECT likelihood(1, 0.5)", "SELECT random()"] {
+            #expect(throws: Failure.self) {
+                try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { db in
+                    try db.forEachRow(sql) { _ in Issue.record("Unexpected row") }
+                }
+            }
+        }
+    }
+
     @Test("only documented SQL functions are authorized")
     func functionAllowlist() throws {
         let (url, writer) = try database()
@@ -187,7 +405,7 @@ struct SQLiteReadTransactionTests {
         }
         #expect(observed?.values == ["fallback": .text("ok"), "n": .integer(2),
                                     "size": .integer(3), "total": .integer(3), "kind": .text("integer")])
-        for sql in ["SELECT abs(-1) AS n", "SELECT randomblob(1) AS b", "SELECT sqlite_version() AS version",
+        for sql in ["SELECT unlikely(1) AS n", "SELECT abs(-1) AS n", "SELECT randomblob(1) AS b", "SELECT sqlite_version() AS version",
                     "SELECT 'a' LIKE 'a' AS n", "SELECT 'a' GLOB 'a' AS n",
                     "SELECT '[1]' -> 0 AS n", "SELECT '[1]' ->> 0 AS n"] {
             #expect(throws: Failure.self) {

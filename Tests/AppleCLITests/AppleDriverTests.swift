@@ -77,6 +77,21 @@ struct AppleDriverTests {
         #expect(detail.contains("Usage: apple notes"))
     }
 
+    @Test(arguments: [["messages", "watch", "--private-invalid-flag"],
+                      ["messages", "--dry-run", "watch", "--private-invalid-flag"]])
+    func watchParseFailuresAreSingleRecords(_ arguments: [String]) throws {
+        let (streams, stdout, stderr) = streams()
+        let status = Apple.execute(arguments: ["apple"] + arguments, streams: streams)
+        #expect(status == AppleExit.usage)
+        #expect(stdout.data.last == 10)
+        #expect(stdout.data.filter { $0 == 10 }.count == 1)
+        let object = try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])
+        #expect(object["tool"] as? String == "messages")
+        #expect(object["ok"] as? Bool == false)
+        #expect(!String(decoding: stdout.data, as: UTF8.self).contains("--private-invalid-flag"))
+        #expect(String(decoding: stderr.data, as: UTF8.self).contains("--private-invalid-flag"))
+    }
+
     @Test("unexpected command errors become internal envelopes and software exits")
     func unexpectedError() throws {
         let (streams, stdout, stderr) = streams()

@@ -85,6 +85,15 @@ struct Apple: ParsableCommand {
         return match?._commandName ?? fallback
     }
 
+    /// ArgumentParser can reject a watch invocation before the stream command runs.
+    /// Only skip the Messages flags that can precede the registered subcommand.
+    private static func isMessagesEventCommand(_ arguments: [String]) -> Bool {
+        guard arguments.dropFirst().first == "messages" else { return false }
+        let flags = ["--text", "--dry-run", "--execute", "--test-mode"]
+        let command = arguments.dropFirst(2).drop(while: { flags.contains($0) }).first
+        return command == "watch" || command == "event-streams"
+    }
+
     // Custom entry point so we can ignore SIGPIPE (a consumer closing the pipe early —
     // `apple … | head` — yields a clean exit, not an uncatchable crash) before dispatch.
     static func main() {
@@ -146,7 +155,10 @@ struct Apple: ParsableCommand {
                 // The human-readable detail may echo operator-supplied argv (e.g. "The value 'X' is
                 // invalid for '--flag'"), so it goes to stderr ONLY — never onto the stdout machine
                 // channel an agent captures. The stdout envelope carries a generic message instead.
-                if !message.isEmpty {
+                let streamError = isMessagesEventCommand(arguments)
+                if streamError {
+                    Output.writeStreamDiagnostic(message)
+                } else if !message.isEmpty {
                     Output.writeError(Data((message + "\n").utf8))
                 }
                 if ecode == .validationFailure {
@@ -154,7 +166,8 @@ struct Apple: ParsableCommand {
                     Output.emitError(
                         tool: Apple.toolForParseFailure(arguments: arguments),
                         type: AppleErrorType.validation,
-                        message: "invalid arguments (see stderr for details)"
+                        message: "invalid arguments (see stderr for details)",
+                        compact: streamError
                     )
                     return AppleExit.usage
                 } else {
@@ -163,7 +176,8 @@ struct Apple: ParsableCommand {
                     Output.emitError(
                         tool: Apple.toolForParseFailure(arguments: arguments),
                         type: AppleErrorType.unknown,
-                        message: "internal error (see stderr for details)"
+                        message: "internal error (see stderr for details)",
+                        compact: streamError
                     )
                     return AppleExit.unknown
                 }

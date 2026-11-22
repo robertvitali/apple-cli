@@ -24,6 +24,7 @@ apple messages
 - [`conversations`](./conversations.md) — List all conversations: 1:1 chats, named groups, and unnamed groups.
 - [`doctor`](./doctor.md) — One-shot health check: FDA + Accessibility + chat.db + AddressBook diagnostics.
 - [`edit`](./edit.md) — Edit an eligible own sent text part and verify persisted content and history.
+- [`event-streams`](./event-streams/index.md) — Inspect and retire local Messages event journals.
 - [`find-contact`](./find-contact.md) — Fuzzy-search contacts by name/nickname; ranked candidates with confidence scores.
 - [`get`](./get.md) — Read one message by exact conversation identity and exact message identity.
 - [`history`](./history.md) — Read one conversation by exact chat GUID or local chat ROWID.
@@ -32,6 +33,7 @@ apple messages
 - [`reply`](./reply/index.md) — Send an exact threaded reply in Messages.
 - [`search`](./search.md) — Search messages: fuzzy (WRatio) + threshold + time window (or contains/exact).
 - [`send`](./send.md) — Send an iMessage/SMS (sends on call; --dry-run previews).
+- [`watch`](./watch.md) — Observe Messages changes as newline-delimited JSON and resume from a saved cursor.
 
 ## Inherited options
 

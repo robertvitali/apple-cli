@@ -100,6 +100,23 @@ public enum Output {
         ScopedCLIStreams.current.stderr.write(data)
     }
 
+    /// Bound diagnostics on stream commands so a blocked stderr cannot hold a journal lease
+    /// or prevent the machine-readable error from reaching an available stdout.
+    package static func writeStreamDiagnostic(_ message: String) {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let sink = ScopedCLIStreams.current.stderr
+        for line in message.split(whereSeparator: \.isNewline) {
+            guard ContinuousClock.now < deadline else { return }
+            var bytes = Data(TextSanitize.neutralizeForTerminal(String(line)).utf8)
+            if let file = sink as? FileHandleOutputSink {
+                guard file.writeRecord(bytes, deadline: deadline) else { return }
+            } else {
+                bytes.append(0x0a)
+                sink.write(bytes)
+            }
+        }
+    }
+
     /// Write pre-rendered bytes to scoped stdout. Used for parser-owned help and version text,
     /// whose formatting must remain byte-for-byte under ArgumentParser's control.
     public static func writeOutput(_ data: Data) {
@@ -162,17 +179,27 @@ public enum Output {
     public static func emitError(tool: String, type: String, message: String,
                                  status: String? = nil, remediation: String? = nil,
                                  applied: [String]? = nil, sandbox: Bool? = nil) {
+        emitError(tool: tool, type: type, message: message, status: status,
+                  remediation: remediation, applied: applied, sandbox: sandbox, compact: false)
+    }
+
+    package static func emitError(tool: String, type: String, message: String,
+                                  status: String? = nil, remediation: String? = nil,
+                                  applied: [String]? = nil, sandbox: Bool? = nil, compact: Bool) {
         // Same "never `false`" normalization as encodeError, so BOTH the encoded path (below) and
         // the hand-rolled fallback (which reads this param directly) agree.
         let sandbox: Bool? = (sandbox == true) ? true : nil
-        if let data = try? encodeError(tool: tool, type: type, message: message,
-                                       status: status, remediation: remediation,
-                                       applied: applied, sandbox: sandbox) {
-            write(data)
+        let envelope = errorEnvelope(tool: tool, type: type, message: message,
+                                     status: status, remediation: remediation,
+                                     applied: applied, sandbox: sandbox)
+        let data = (try? envelopeEncoder(pretty: !compact).encode(envelope))
+            ?? fallbackErrorJSON(tool: tool, type: type, message: message,
+                                 status: status, remediation: remediation,
+                                 applied: applied, sandbox: sandbox)
+        if compact, let output = ScopedCLIStreams.current.stdout as? FileHandleOutputSink {
+            output.writeRecord(data, deadline: .now.advanced(by: .seconds(2)))
         } else {
-            write(fallbackErrorJSON(tool: tool, type: type, message: message,
-                                    status: status, remediation: remediation,
-                                    applied: applied, sandbox: sandbox))
+            write(data)
         }
     }
 

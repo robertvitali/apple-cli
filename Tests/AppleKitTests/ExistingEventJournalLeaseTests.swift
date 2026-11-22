@@ -34,6 +34,321 @@ struct ExistingEventJournalLeaseTests {
         try Lease.acquire(root: fixture.root.path, streamID: fixture.id)
     }
 
+    @Test("An existing registry lease binds its named parent, root, and mutex", arguments: ["parent", "root", "lock"])
+    func registryNamespaceReplacement(component: String) throws {
+        let parent = try scratch.directory().appendingPathComponent("parent")
+        let root = parent.appendingPathComponent("registry")
+        let lock = root.appendingPathComponent("registry.lock")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try #require(chmod(root.path, 0o700) == 0)
+        try Data().write(to: lock)
+        try #require(chmod(lock.path, 0o600) == 0)
+        func replaceDuringLease() throws {
+            try Lease.withRegistryLock(parent: parent.path, directory: "registry") { _, check in
+                try check()
+                #expect(throws: Lease.Failure.busy) {
+                    try Lease.withRegistryLock(parent: parent.path, directory: "registry") { _, _ in }
+                }
+                let target = component == "parent" ? parent : (component == "root" ? root : lock)
+                let parked = target.deletingLastPathComponent().appendingPathComponent("parked")
+                try FileManager.default.moveItem(at: target, to: parked)
+                if component == "lock" {
+                    try Data().write(to: lock)
+                    try #require(chmod(lock.path, 0o600) == 0)
+                } else {
+                    try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false)
+                    try #require(chmod(target.path, 0o700) == 0)
+                }
+                #expect(throws: Lease.Failure.changed) { try check() }
+                // The lock owner checks again before returning even if its caller handled the error.
+            }
+        }
+        #expect(throws: Lease.Failure.changed) { try replaceDuringLease() }
+    }
+
+    @Test("Inspecting a registry never creates its mutex or accepts a traversing name")
+    func registryWithoutMutex() throws {
+        let root = try scratch.directory().appendingPathComponent("registry")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        try #require(chmod(root.path, 0o700) == 0)
+        let parent = root.deletingLastPathComponent().path
+        #expect(throws: Lease.Failure.unavailable) {
+            try Lease.withRegistryLock(parent: parent, directory: "registry") { _, _ in }
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+        for name in ["", ".", "..", "registry/", "../registry", "registry\u{0}suffix"] {
+            #expect(throws: Lease.Failure.unsafeState) {
+                try Lease.withRegistryLock(parent: parent, directory: name) { _, _ in }
+            }
+        }
+    }
+    @Test("Provisioning initializes an empty registry and preserves an occupied registry missing its mutex")
+    func registryProvisioning() throws {
+        let parent = try scratch.directory()
+        let root = parent.appendingPathComponent("registry")
+        func provision() throws {
+            try Lease.withRegistryLock(parent: parent.path, directory: "registry", access: .provision) { _, check in
+                try check()
+            }
+        }
+        try provision()
+        try provision()
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["registry.lock"])
+        try FileManager.default.moveItem(at: root.appendingPathComponent("registry.lock"),
+                                         to: root.appendingPathComponent("occupied"))
+        #expect(throws: Lease.Failure.unavailable) { try provision() }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path) == ["occupied"])
+    }
+
+    @Test("Registry slots bind physical identity, lifecycle phase and ownership mode")
+    func registrySlotIdentity() throws {
+        let parent = try scratch.directory()
+        try Lease.withRegistryLock(parent: parent.path, directory: "registry", access: .provision) { fd, _ in
+            let id = UUID()
+            let name = id.uuidString.lowercased()
+            try #require(mkdirat(fd, name, 0o700) == 0)
+            let initial = try Lease.registrySlots(in: fd, access: .provision)
+            #expect(initial[id]?.state == .active)
+            let staged = ".creating-" + name
+            try #require(renameat(fd, name, fd, staged) == 0)
+            var expected = initial
+            expected[id]?.state = .creating
+            #expect(try Lease.registrySlots(in: fd, access: .existing) == expected)
+            try #require(mkdirat(fd, name, 0o700) == 0)
+            #expect(throws: Lease.Failure.unsafeState) { try Lease.registrySlots(in: fd, access: .existing) }
+            try #require(renameat(fd, staged, AT_FDCWD, parent.appendingPathComponent("parked").path) == 0)
+            #expect(try Lease.registrySlots(in: fd, access: .existing) != initial)
+            try #require(fchmodat(fd, name, 0o750, 0) == 0)
+            #expect(try Lease.registrySlots(in: fd, access: .existing)[id]?.name == name)
+            #expect(throws: Lease.Failure.unsafeState) { try Lease.registrySlots(in: fd, access: .provision) }
+        }
+    }
+
+    @Test("All registry phases share four slots")
+    func registryQuota() throws {
+        let parent = try scratch.directory()
+        try Lease.withRegistryLock(parent: parent.path, directory: "registry", access: .provision) { fd, _ in
+            for prefix in ["", ".creating-", ".retiring-", ""] {
+                try #require(mkdirat(fd, prefix + UUID().uuidString.lowercased(), 0o700) == 0)
+            }
+            #expect(try Lease.registrySlots(in: fd, access: .provision).count == 4)
+            try #require(mkdirat(fd, UUID().uuidString.lowercased(), 0o700) == 0)
+            #expect(throws: Lease.Failure.unsafeState) { try Lease.registrySlots(in: fd, access: .existing) }
+        }
+    }
+
+    @Test("A recovery lease admits only observed rollback journal transitions")
+    func recoveryTransitions() throws {
+        let f = try fixture(journal: false)
+        let side = f.file("state.sqlite-journal")
+        let owner = try Lease.Recovery.acquire(root: f.root.path, streamID: f.id)
+        #expect(throws: Lease.Failure.busy) { try acquire(f) }
+        #expect(try !owner.observe(.check))
+        #expect(throws: Lease.Failure.changed) { try owner.observe(.deleted) }
+        try Data([9]).write(to: side)
+        try #require(chmod(side.path, 0o600) == 0)
+        #expect(throws: Lease.Failure.changed) { try owner.validate() }
+        #expect(throws: Lease.Failure.unsafeState) { try owner.observe(.created) }
+        try #require(truncate(side.path, 0) == 0)
+        #expect(try owner.observe(.created))
+        #expect(throws: Lease.Failure.changed) { try owner.observe(.created) }
+        try owner.synchronize()
+        let parked = f.root.appendingPathComponent("parked")
+        try FileManager.default.moveItem(at: side, to: parked)
+        #expect(throws: Lease.Failure.changed) { try owner.observe(.deleted) }
+        try FileManager.default.removeItem(at: parked)
+        #expect(try !owner.observe(.deleted))
+        try owner.synchronize()
+    }
+
+    @Test("A journal changing while creation is acknowledged never becomes the retained identity",
+          arguments: ["vanish", "grow"])
+    func interruptedJournalCreation(change: String) throws {
+        let f = try fixture(journal: false)
+        let side = f.file("state.sqlite-journal")
+        let directory = open(f.stream.path, O_DIRECTORY | O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        try #require(directory >= 0)
+        defer { close(directory) }
+        var reads = 0
+        let owner = try Lease.Recovery(directoryFD: directory, initial: nil) {
+            var metadata = stat()
+            if lstat(side.path, &metadata) != 0 {
+                guard errno == ENOENT else { throw Lease.Failure.unsafeState }
+                return nil
+            }
+            reads += 1
+            if change == "vanish", reads == 1 { try FileManager.default.removeItem(at: side) }
+            if change == "grow", reads == 2 { try Data([4]).write(to: side) }
+            return Lease.Identity(metadata)
+        }
+        try Data().write(to: side)
+        try #require(chmod(side.path, 0o600) == 0)
+        #expect(throws: Lease.Failure.changed) { try owner.observe(.created) }
+        if change == "grow" { try FileManager.default.removeItem(at: side) }
+        #expect(try !owner.observe(.check))
+    }
+
+    @Test("Recovery requires an empty pinned journal through both syncs", arguments: ["before", "journal", "directory"])
+    func lateJournalWrite(stage: String) throws {
+        let f = try fixture()
+        let owner = try Lease.Recovery.acquire(root: f.root.path, streamID: f.id)
+        func writeToJournal() throws { try Data([3]).write(to: f.file("state.sqlite-journal")) }
+        if stage == "before" { try writeToJournal() }
+        var completed: [String] = []
+        func sync() throws {
+            try owner.synchronize(syncJournal: { _ in
+                completed.append("journal")
+                if stage == "journal" { try writeToJournal() }
+            }, syncDirectory: { _ in
+                completed.append("directory")
+                if stage == "directory" { try writeToJournal() }
+            })
+        }
+        #expect(throws: Lease.Failure.changed) { try sync() }
+        let expected = stage == "before" ? [] : (stage == "journal" ? ["journal"] : ["journal", "directory"])
+        #expect(completed == expected)
+        #expect(try Data(contentsOf: f.file("state.sqlite-journal")) == Data([3]))
+    }
+
+    @Test("Recovery propagates both sync failures and skips the absent journal")
+    func recoverySyncErrors() throws {
+        let f = try fixture()
+        let owner = try Lease.Recovery.acquire(root: f.root.path, streamID: f.id)
+        let fault = Lease.Failure.systemCall("fixture", EIO)
+        func failJournal() throws {
+            try owner.synchronize(syncJournal: { _ in throw fault }, syncDirectory: { _ in Issue.record("unexpected directory sync") })
+        }
+        #expect(throws: fault) { try failJournal() }
+        try FileManager.default.removeItem(at: f.file("state.sqlite-journal"))
+        #expect(try !owner.observe(.deleted))
+        func failDirectory() throws {
+            try owner.synchronize(syncJournal: { _ in Issue.record("absent journal") }, syncDirectory: { _ in throw fault })
+        }
+        #expect(throws: fault) { try failDirectory() }
+    }
+
+    @Test("Stream provisioning retains exclusive ownership across publication and initialization")
+    func provisionAndReopen() throws {
+        let parent = try scratch.directory()
+        let root = parent.appendingPathComponent("registry")
+        var assigned: [UUID] = []
+        let id: UUID
+        do {
+            let stream = try Lease.provision(parent: parent.path, registry: "registry", assigned: { assigned.append($0) })
+            id = stream.id
+            #expect(assigned == [id])
+            let owner = try stream.initializationLease()
+            #expect(throws: Lease.Failure.changed) { try stream.initializationLease() }
+            #expect(try owner.observe(.check))
+            #expect(throws: Lease.Failure.busy) { try Lease.acquire(root: root.path, streamID: id) }
+            try owner.synchronize()
+            withExtendedLifetime(stream) {}
+        }
+        let fixed = try Lease.acquire(root: root.path, streamID: id)
+        try fixed.validate()
+        withExtendedLifetime(fixed) {}
+    }
+
+    @Test("Provisioning and SQLite handoff preserve nonempty files", arguments: ["state.sqlite", "state.sqlite-journal"], [false, true])
+    func changedBootstrapFile(name: String, afterReturn: Bool) throws {
+        let parent = try scratch.directory()
+        let root = parent.appendingPathComponent("registry")
+        var assigned: UUID?
+        func write() throws {
+            let id = try #require(assigned)
+            try Data([7]).write(to: root.appendingPathComponent(id.uuidString.lowercased()).appendingPathComponent(name))
+        }
+        func start() throws {
+            let stream = try Lease.provision(parent: parent.path, registry: "registry", assigned: { assigned = $0 }) {
+                if $0 == .published && !afterReturn { try write() }
+            }
+            if afterReturn { try write() }
+            _ = try stream.initializationLease()
+        }
+        #expect(throws: Lease.Failure.unsafeState) { try start() }
+        let id = try #require(assigned)
+        let target = root.appendingPathComponent(id.uuidString.lowercased()).appendingPathComponent(name)
+        #expect(try Data(contentsOf: target) == Data([7]))
+    }
+
+    @Test("Retirement preview preserves the stream and execution removes only the selected UUID")
+    func retirementLifecycle() throws {
+        let parent = try scratch.directory()
+        func start() throws -> UUID {
+            try Lease.provision(parent: parent.path, registry: "registry", assigned: { _ in }).id
+        }
+        let id = try start()
+        let sibling = try start()
+        func inspect(_ request: Lease.RegistryRequest) throws -> [Lease.RegistryRecord<UUID>] {
+            try Lease.inspectRegistry(parent: parent.path, registry: "registry", request: request) { id, owner in
+                try owner.validate()
+                return id
+            }
+        }
+        let plan = try #require(inspect(.preview(id)).first)
+        #expect(plan.files == ["lock", "state.sqlite", "state.sqlite-journal"])
+        #expect(Set(try inspect(.list).map(\.id)) == [id, sibling])
+        #expect(try inspect(.retire(id)).first?.files == plan.files)
+        #expect(try inspect(.list).map(\.id) == [sibling])
+        #expect(throws: Lease.Failure.unavailable) { try inspect(.retire(id)) }
+    }
+
+    @Test("A replaced slot cannot supply details for the selected stream")
+    func replacedRegistrySlot() throws {
+        let parent = try scratch.directory()
+        let root = parent.appendingPathComponent("r")
+        let id = try Lease.provision(parent: parent.path, registry: "r", assigned: { _ in }).id
+        let slot = root.appendingPathComponent(id.uuidString.lowercased())
+        let parked = parent.appendingPathComponent("parked")
+        func inspect() throws {
+            _ = try Lease.inspectRegistry(parent: parent.path, registry: "r", request: .preview(id), checkpoint: { stage in
+                if case .inspectSlot = stage {
+                    try FileManager.default.moveItem(at: slot, to: parked)
+                    try FileManager.default.copyItem(at: parked, to: slot)
+                }
+            }) { _, _ in Issue.record("replacement supplied metadata") }
+        }
+        #expect(throws: Lease.Failure.changed) { try inspect() }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: parked.path).count == 3)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: slot.path).count == 3)
+    }
+
+    @Test("An interrupted retirement rejects a journal without its database")
+    func orphanRetirementJournal() throws {
+        let parent = try scratch.directory()
+        let id = try Lease.provision(parent: parent.path, registry: "r", assigned: { _ in }).id
+        let root = parent.appendingPathComponent("r")
+        let name = id.uuidString.lowercased()
+        let tomb = root.appendingPathComponent(".retiring-" + name)
+        try FileManager.default.moveItem(at: root.appendingPathComponent(name), to: tomb)
+        try FileManager.default.moveItem(at: tomb.appendingPathComponent("state.sqlite"), to: parent.appendingPathComponent("parked"))
+        let side = tomb.appendingPathComponent("state.sqlite-journal")
+        try Data([9]).write(to: side)
+        for action in [Lease.RegistryRequest.preview(id), .retire(id)] {
+            #expect(throws: Lease.Failure.unsafeState) {
+                try Lease.inspectRegistry(parent: parent.path, registry: "r", request: action) { _, _ in false }
+            }
+        }
+        #expect(try Data(contentsOf: side) == Data([9]))
+    }
+
+    @Test("Changing contents after detach preserves the changed database")
+    func changedRetirementFile() throws {
+        let parent = try scratch.directory()
+        let id = try Lease.provision(parent: parent.path, registry: "r", assigned: { _ in }).id
+        let root = parent.appendingPathComponent("r")
+        let tomb = root.appendingPathComponent(".retiring-" + id.uuidString.lowercased())
+        let main = tomb.appendingPathComponent("state.sqlite")
+        func retire() throws {
+            _ = try Lease.inspectRegistry(parent: parent.path, registry: "r", request: .retire(id), checkpoint: { stage in
+                if case .afterDetach = stage { try Data([4]).write(to: main) }
+            }) { _, owner in try owner.validate() }
+        }
+        #expect(throws: Lease.Failure.changed) { try retire() }
+        #expect(try Data(contentsOf: main) == Data([4]))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: tomb.path).count == 3)
+    }
+
     @Test("Existing state is leased without changing file bytes or inventory", arguments: [true, false])
     func validExistingState(journal: Bool) throws {
         let f = try fixture(journal: journal)
@@ -196,6 +511,26 @@ struct ExistingEventJournalLeaseTests {
     @Test("Noncanonical paths are refused before opening", arguments: ["relative", "/tmp/../tmp", "/tmp\0ignored", "/tmp/", "/tmp//entry", "/tmp/./entry"])
     func invalidPath(path: String) {
         #expect(throws: Lease.Failure.unsafeState) { try Lease.acquire(root: path, streamID: UUID()) }
+    }
+
+    @Test("Combining marks preserve POSIX separators in existing journal roots")
+    func combiningMarkRoot() throws {
+        let f = try fixture()
+        let leaf = "\u{301}journal"
+        let root = f.root.appendingPathComponent(leaf)
+        let detour = f.root.appendingPathComponent("detour")
+        for dir in [root, detour] {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+            try #require(chmod(dir.path, 0o700) == 0)
+        }
+        try FileManager.default.moveItem(at: f.stream, to: root.appendingPathComponent(f.stream.lastPathComponent))
+        do {
+            let lease = try Lease.acquire(root: root.path, streamID: f.id)
+            try lease.validate()
+        }
+        for path in [f.root.path + "//" + leaf, f.root.path + "/./" + leaf, detour.path + "/../" + leaf] {
+            #expect(throws: Lease.Failure.unsafeState) { try Lease.acquire(root: path, streamID: f.id) }
+        }
     }
 
     @Test("Directory ACL entries cannot bypass private mode checks", arguments: ["root", "stream"])

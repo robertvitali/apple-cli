@@ -5,6 +5,8 @@ enum MessageSummaryPlist {
     indirect enum Value: Equatable {
         case null, boolean(Bool), integer(Int64), real(Double), date(Double)
         case data(Data), string(String), array([Value]), dictionary([String: Value])
+        /// Event capture validates non-key text without retaining its contents.
+        case omittedString
     }
 
     enum Failure: Error, Equatable { case corrupt, unsupportedFormat, resourceLimit, requestLimit }
@@ -14,11 +16,11 @@ enum MessageSummaryPlist {
         var remainingBytes = 4 * 1_024 * 1_024
     }
 
-    static func decode(_ data: Data, budget: inout Budget,
+    static func decode(_ data: Data, budget: inout Budget, forEventCapture: Bool = false,
                        checkCancellation: () throws -> Void = { try Task.checkCancellation() }) throws -> Value {
         try checkCancellation()
         guard data.count <= 1_048_576 else { throw Failure.resourceLimit }
-        var reader = Reader(bytes: Array(data))
+        var reader = Reader(bytes: Array(data), eventSource: forEventCapture ? data : nil)
         return try reader.read(budget: &budget, checkCancellation: checkCancellation)
     }
 
@@ -32,6 +34,8 @@ enum MessageSummaryPlist {
 
     private struct Reader {
         let bytes: [UInt8]
+        // Event fingerprints can hash ranges of the original blob directly.
+        let eventSource: Data?
         var objects: [Object] = []
         var referenceWidth = 0
         var tableStart = 0
@@ -160,7 +164,7 @@ enum MessageSummaryPlist {
             return Object(start: start, end: payload + byteCount, marker: marker, payload: payload, count: count)
         }
 
-        mutating func value(_ id: Int, depth: Int, budget: inout Budget,
+        mutating func value(_ id: Int, depth: Int, isKey: Bool = false, budget: inout Budget,
                             checkCancellation: () throws -> Void) throws -> Value {
             try checkCancellation()
             guard depth <= 32 else { throw Failure.resourceLimit }
@@ -182,18 +186,24 @@ enum MessageSummaryPlist {
                 return kind == 3 ? .date(number) : .real(number)
             case 4:
                 try charge(bytes: object.count, budget: &budget)
+                if let eventSource {
+                    let start = eventSource.startIndex + object.payload
+                    return .data(eventSource[start..<start + object.count])
+                }
                 return .data(Data(bytes[object.payload..<object.end]))
             case 5:
                 try charge(bytes: object.count, budget: &budget)
                 let slice = bytes[object.payload..<object.end]
                 guard slice.allSatisfy({ $0 < 128 }) else { throw Failure.corrupt }
+                guard eventSource == nil || isKey else { return .omittedString }
                 return .string(String(decoding: slice, as: UTF8.self))
             case 6:
                 // Three UTF-8 bytes per UTF-16 code unit is a conservative
                 // expansion bound, charged before allocating/transcoding.
                 try charge(bytes: object.count * 3, budget: &budget)
                 var units: [UInt16] = []
-                units.reserveCapacity(object.count)
+                let retainText = eventSource == nil || isKey
+                if retainText { units.reserveCapacity(object.count) }
                 var needsLowSurrogate = false
                 for i in 0..<object.count {
                     if i % 1_024 == 0 { try checkCancellation() }
@@ -204,10 +214,10 @@ enum MessageSummaryPlist {
                     } else if (0xd800...0xdbff).contains(unit) {
                         needsLowSurrogate = true
                     } else if (0xdc00...0xdfff).contains(unit) { throw Failure.corrupt }
-                    units.append(unit)
+                    if retainText { units.append(unit) }
                 }
                 guard !needsLowSurrogate else { throw Failure.corrupt }
-                return .string(String(decoding: units, as: UTF16.self))
+                return retainText ? .string(String(decoding: units, as: UTF16.self)) : .omittedString
             case 0xa, 0xd:
                 if kind == 0xa {
                     var values: [Value] = []
@@ -221,7 +231,9 @@ enum MessageSummaryPlist {
                 var values: [String: Value] = [:]
                 for i in 0..<object.count {
                     let keyRef = try reference(object, index: i)
-                    guard case .string(let key) = try value(keyRef, depth: depth + 1, budget: &budget,
+                    let keyKind = objects[keyRef].marker >> 4
+                    if eventSource != nil && keyKind != 5 && keyKind != 6 { throw Failure.corrupt }
+                    guard case .string(let key) = try value(keyRef, depth: depth + 1, isKey: true, budget: &budget,
                                                           checkCancellation: checkCancellation),
                           values[key] == nil else { throw Failure.corrupt }
                     let valueRef = try reference(object, index: i + object.count)

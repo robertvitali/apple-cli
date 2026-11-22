@@ -6,7 +6,7 @@
     "test_count": 0
   },
   "schema_version": 1,
-  "test_count": 482,
+  "test_count": 484,
   "tiers": {
     "hosted": {
       "files": [
@@ -530,7 +530,7 @@
           "test_count": 113
         },
         {
-          "file_sha256": "9c9d2e4486804e629051b003ad1a53ce2e4e97e5282dfc7210f01aaec8e5bcf9",
+          "file_sha256": "855d30317ba4edf0bbcec8a73ba85ef5e5538598ead01a79ee35d9aa46340571",
           "ordered_title_sha256": [
             "421694f4437d54b99621e748fcfa13bb607fd447cd34a3b2ece072e134441eda",
             "b499aa91a70ed2b30272e113eaf0ce4421b6a2055a65cd3eef3a0732221c781f",
@@ -567,10 +567,12 @@
             "bb03762c6c75f7e0ae7d11561f18ad7d9bab7947f77f6050cb0369c37846e705",
             "5e7bb16e6abfcf9270903e873e2c83321d2a91469b35ac0a563687550eb8a0d8",
             "11e0df0ba464f52522ffded7805769eadeff3ef8a0ef2961dd66ca0df96268aa",
-            "032a59cfd99fa9bf29a9b5cb07e8562267e118806e16d89ee1513cc9e7437535"
+            "032a59cfd99fa9bf29a9b5cb07e8562267e118806e16d89ee1513cc9e7437535",
+            "108522dd3b77675feaacb97c90adeb18b950bc7cfc4f58c20f1097ab60b8e53b",
+            "c9224c7ad95543df91ec97ae73bcd667bbf1b130287c1f667a76b5f9ecf5763c"
           ],
           "path": "bats/local/messages.bats",
-          "test_count": 36
+          "test_count": 38
         },
         {
           "file_sha256": "e5db91b8454a650ed23a3febd7db5b1543818370d435f9aa0811446c0baff307",
@@ -603,7 +605,7 @@
           "test_count": 3
         }
       ],
-      "test_count": 167
+      "test_count": 169
     }
   }
 }

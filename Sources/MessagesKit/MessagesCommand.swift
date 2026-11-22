@@ -16,7 +16,7 @@ public struct MessagesCommand: ParsableCommand {
         abstract: "iMessage / SMS — send, read, search.",
         subcommands: [
             Recent.self, Send_.self, FindContact.self, Chats.self, Search.self,
-            Conversations.self, History.self, Get.self,
+            Conversations.self, History.self, Get.self, MessagesWatch.self, MessagesEventStreams.self,
             Reaction.self, Reply.self, MessagesAttachment.self, MessagesEdit.self, MessagesAutomation.self,
             CheckAvailability.self, CheckDB.self, CheckContacts.self, CheckAddressBook.self,
             Doctor.self,
@@ -29,7 +29,7 @@ public struct MessagesCommand: ParsableCommand {
     /// smoke test's ok=false contract, and gives agents a machine-readable nudge).
     public func run() throws {
         try runGuarded(tool: "messages") {
-            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, reply, attachment, edit, automation, check-availability, check-db, check-contacts, check-addressbook, doctor")
+            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, watch, event-streams, reaction, reply, attachment, edit, automation, check-availability, check-db, check-contacts, check-addressbook, doctor")
         }
     }
 }

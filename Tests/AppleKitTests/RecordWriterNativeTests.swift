@@ -197,7 +197,7 @@ struct RecordWriterNativeTests {
         "ignored-pipe", "ignored-socket",
         "full-pipe-timeout", "full-pipe-cancel",
         "full-fifo-timeout", "full-fifo-cancel",
-        "full-socket-timeout", "full-socket-cancel", "close-reuse",
+        "full-socket-timeout", "full-socket-cancel", "close-reuse", "closed-input-pipe",
     ])
     func native(_ mode: String) throws {
         let result = try runProbe(mode)
@@ -207,6 +207,7 @@ struct RecordWriterNativeTests {
 
     @Test("named FIFO partial-space reduction has explicit host evidence", arguments: [
         "partial-fifo-timeout", "partial-fifo-cancel", "partial-fifo-drain",
+        "blocking-partial-fifo-timeout", "blocking-partial-fifo-cancel", "blocking-partial-fifo-drain",
     ])
     func partialNamedFIFO(_ mode: String) throws {
         let result = try runProbe(mode)

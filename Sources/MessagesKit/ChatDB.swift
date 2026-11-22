@@ -10,7 +10,11 @@ import CryptoKit
 /// `get_contact_name` (chat-fallback half), and `check_messages_db_access`.
 public struct ChatDB {
     public static func defaultPath() -> String {
-        FileManager.default.homeDirectoryForCurrentUser.path + "/Library/Messages/chat.db"
+        path(inHome: FileManager.default.homeDirectoryForCurrentUser.path)
+    }
+
+    static func path(inHome home: String) -> String {
+        home + "/Library/Messages/chat.db"
     }
 
     private let reader: SQLiteReader
@@ -2607,7 +2611,7 @@ public struct ChatDB {
         case 2004: return (action, ExactReactionValue(key: "emphasize", name: "emphasize", emoji: nil, supported: true))
         case 2005: return (action, ExactReactionValue(key: "question", name: "question", emoji: nil, supported: true))
         case 2006:
-            let value = hasCustomEmoji ? emoji.flatMap { validCustomReactionEmoji($0) ? $0 : nil } : nil
+            let value = hasCustomEmoji ? emoji.flatMap { Self.validCustomReactionEmoji($0) ? $0 : nil } : nil
             return (action, ExactReactionValue(key: value.map { "custom:\($0)" } ?? "custom:unknown",
                                                name: value == nil ? "unknown" : "custom",
                                                emoji: value, supported: value != nil))
@@ -2627,7 +2631,16 @@ public struct ChatDB {
         }
     }
 
-    private func validCustomReactionEmoji(_ value: String) -> Bool {
+    // The longest supported sequence is a technologist with a skin-tone modifier.
+    static let maximumStoredCustomEmojiBytes = 15
+
+    static func storedReactionEmoji(_ bytes: Data) -> String? {
+        let value = String(decoding: bytes, as: UTF8.self)
+        return value.utf8.elementsEqual(bytes) ? value : nil
+    }
+
+    static func validCustomReactionEmoji(_ value: String) -> Bool {
+        guard value.utf8.count <= maximumStoredCustomEmojiBytes else { return false }
         // Deliberately bounded grammar, not a claim to support every Unicode emoji:
         // * keycap: [0-9#*] FE0F? 20E3;
         // * standalone non-component emoji scalar, optionally FE0F for a text-

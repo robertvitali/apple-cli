@@ -10,7 +10,7 @@ filtering.
 
 ## The envelope
 
-Every command — success or failure — emits exactly one envelope.
+Single-result commands emit one envelope. The Messages watch command streams newline-delimited JSON with one envelope per record. Read each complete line and check its `ok` field. See the [watch record and checkpoint reference](../messages/watch.md#notes).
 
 ```json
 {

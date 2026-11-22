@@ -454,7 +454,8 @@ captures a baseline; historical backfill is explicit. Polling observes snapshots
 not every intermediate state: coalesced or unobservable transitions are not promised.
 
 Track new records and observed changes to edits/reactions/attachments/read/delivery
-state, including pending hydration. Rescan the full subscribed scope in bounded-memory
+state, including changes to the stored attachment transfer state. File availability
+can change without a database update or a watch event. Rescan the full subscribed scope in bounded-memory
 pages, retaining durable comparison state independently of journal retention. Snapshot
 boundaries define each scan; insertion cursors alone cannot detect older-row changes.
 Retention bounds journal disk usage; comparison-state storage scales with subscribed

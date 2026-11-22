@@ -21,8 +21,8 @@ public struct RecordWriterError: Error, Sendable, Equatable {
 /// protection (SIG_IGN or F_GETNOSIGPIPE), which the caller must keep stable. Other writers to the
 /// same stream are unsupported. Concurrent or reentrant calls fail with `busy`, rather than queue.
 ///
-/// Cancellation and deadlines are cooperative. In particular, a blocking named FIFO can block
-/// after reporting writable; regular-file and device writes can also delay cancellation. Callbacks
+/// Blocking pipe writes are limited to the observed free space. Regular-file and device writes
+/// can delay cooperative cancellation or deadlines. Callbacks
 /// must return promptly. Success means that the local writes accepted the complete LF-terminated
 /// frame, not that a consumer processed it or persisted it. After an accepted attempt fails, stop
 /// using the stream: the writer refuses subsequent records, including after a zero-byte failure.
@@ -33,6 +33,7 @@ public final class RecordWriter: @unchecked Sendable {
         let descriptor: Int32
         let kind: Kind
         let chunkLimit: Int
+        let pipeMonitor: RecordWriterPipeMonitor?
     }
     private struct Progress {
         var bytes = 0
@@ -45,6 +46,7 @@ public final class RecordWriter: @unchecked Sendable {
     private let io: any RecordWriterIO
     private let kind: Kind
     private let chunkLimit: Int
+    private var pipeMonitor: RecordWriterPipeMonitor?
     private var descriptor: Int32?
     private var state = State.ready
 
@@ -58,6 +60,7 @@ public final class RecordWriter: @unchecked Sendable {
         self.descriptor = prepared.descriptor
         self.kind = prepared.kind
         self.chunkLimit = prepared.chunkLimit
+        self.pipeMonitor = prepared.pipeMonitor
     }
 
     deinit {
@@ -102,6 +105,7 @@ public final class RecordWriter: @unchecked Sendable {
         defer { lock.unlock() }
         guard let descriptor else { return }
         self.descriptor = nil
+        pipeMonitor = nil
         state = .closed
         if case .failure(let failure) = io.close(descriptor) {
             throw Self.error(.closeFailure, errno: failure.code)
@@ -157,8 +161,10 @@ public final class RecordWriter: @unchecked Sendable {
             guard atomicLimit > 0 else { throw error(.unsupportedDescriptor) }
             limit = min(limit, atomicLimit)
         }
+        let monitor = kind == .fifo && flags & O_NONBLOCK == 0
+            ? try require(io.monitorBlockingPipe(descriptor), .unsupportedDescriptor) : nil
         accepted = true
-        return Prepared(descriptor: descriptor, kind: kind, chunkLimit: limit)
+        return Prepared(descriptor: descriptor, kind: kind, chunkLimit: limit, pipeMonitor: monitor)
     }
 
     @discardableResult
@@ -179,24 +185,34 @@ public final class RecordWriter: @unchecked Sendable {
 
     private func waitWritable(_ descriptor: Int32, deadline: ContinuousClock.Instant,
                               isCancelled: @Sendable () -> Bool,
-                              progress: inout Progress) throws(RecordWriterError) {
+                              progress: inout Progress) throws(RecordWriterError) -> Int {
         while true {
             let remaining = try checkpoint(deadline: deadline, isCancelled: isCancelled, bytes: progress.bytes)
             // Clamp before converting; a distant deadline must not overflow integer milliseconds.
             let milliseconds: Int32 = remaining >= .milliseconds(50) ? 50
                 : Int32((remaining.components.attoseconds + 999_999_999_999_999) / 1_000_000_000_000_000)
-            switch io.pollWritable(descriptor, milliseconds: milliseconds) {
+            let readiness: Result<RecordWriterReadiness?, RecordWriterSystemError>
+            if let pipeMonitor {
+                readiness = pipeMonitor.wait(milliseconds: milliseconds)
+            } else {
+                readiness = io.pollWritable(descriptor, milliseconds: milliseconds).map { flags in
+                    flags.map { RecordWriterReadiness(flags: $0, capacity: chunkLimit) }
+                }
+            }
+            switch readiness {
             case .success(nil): continue
             case .success(let returned?):
-                if returned & Int16(POLLNVAL) != 0 {
+                if returned.flags & Int16(POLLNVAL) != 0 {
                     throw Self.error(kind == .character ? .unsupportedDescriptor : .invalidDescriptor,
                                      bytes: progress.bytes)
                 }
-                if returned & Int16(POLLERR | POLLHUP) != 0 {
+                if returned.flags & Int16(POLLERR | POLLHUP) != 0 {
                     throw Self.error(.writeFailure, bytes: progress.bytes)
                 }
-                guard returned & Int16(POLLOUT) != 0 else { throw Self.error(.writeFailure, bytes: progress.bytes) }
-                return
+                guard returned.flags & Int16(POLLOUT) != 0, returned.capacity > 0 else {
+                    throw Self.error(.writeFailure, bytes: progress.bytes)
+                }
+                return returned.capacity
             case .failure(let failure):
                 if failure.code == EINTR { try transient(failure.code, progress: &progress); continue }
                 let unsupported = kind == .character && (failure.code == ENODEV || failure.code == EOPNOTSUPP)
@@ -213,11 +229,12 @@ public final class RecordWriter: @unchecked Sendable {
         var needsPoll = false
         while offset < buffer.count {
             try checkpoint(deadline: deadline, isCancelled: isCancelled, bytes: progress.bytes)
+            var writable = chunkLimit
             if kind == .fifo || needsPoll {
-                try waitWritable(descriptor, deadline: deadline, isCancelled: isCancelled, progress: &progress)
+                writable = try waitWritable(descriptor, deadline: deadline, isCancelled: isCancelled, progress: &progress)
             }
             try checkpoint(deadline: deadline, isCancelled: isCancelled, bytes: progress.bytes)
-            let count = min(kind == .fifo ? progress.fifoChunk : chunkLimit, buffer.count - offset)
+            let count = min(writable, progress.fifoChunk, buffer.count - offset)
             let bytes = UnsafeRawBufferPointer(rebasing: buffer[offset..<(offset + count)])
             let result = kind == .socket
                 ? io.send(descriptor, bytes: bytes, flags: MSG_DONTWAIT | MSG_NOSIGNAL)
@@ -259,6 +276,7 @@ protocol RecordWriterIO: Sendable {
     func ignoresSIGPIPE() -> Result<Bool, RecordWriterSystemError>
     func noSIGPIPE(_ descriptor: Int32) -> Result<Int32, RecordWriterSystemError>
     func pipeAtomicLimit(_ descriptor: Int32) -> Result<Int, RecordWriterSystemError>
+    func monitorBlockingPipe(_ descriptor: Int32) -> Result<RecordWriterPipeMonitor, RecordWriterSystemError>
     func pollWritable(_ descriptor: Int32, milliseconds: Int32) -> Result<Int16?, RecordWriterSystemError>
     func write(_ descriptor: Int32, bytes: UnsafeRawBufferPointer) -> Result<Int, RecordWriterSystemError>
     func send(_ descriptor: Int32, bytes: UnsafeRawBufferPointer, flags: Int32) -> Result<Int, RecordWriterSystemError>
@@ -298,6 +316,9 @@ struct DarwinRecordWriterIO: RecordWriterIO {
     }
     func noSIGPIPE(_ descriptor: Int32) -> Result<Int32, RecordWriterSystemError> {
         result(fcntl(descriptor, F_GETNOSIGPIPE))
+    }
+    func monitorBlockingPipe(_ descriptor: Int32) -> Result<RecordWriterPipeMonitor, RecordWriterSystemError> {
+        Result { () throws(RecordWriterSystemError) in try RecordWriterPipeMonitor(descriptor) }
     }
     func pipeAtomicLimit(_ descriptor: Int32) -> Result<Int, RecordWriterSystemError> {
         errno = 0

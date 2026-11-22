@@ -45,6 +45,19 @@ struct MessageEventCursorTests {
         #expect(filter.conversations?.last?.rawValue.utf8.elementsEqual("\u{e9}".utf8) == true)
     }
 
+    @Test func storedIdentifiersPreserveExactUTF8() throws {
+        for text in [" A ", "é", "e\u{301}", String(repeating: "é", count: 512)] {
+            let storage = Data([0xff]) + Data(text.utf8)
+            let identifier = try MessageEventGUID(storedBytes: storage.dropFirst())
+            #expect(identifier == (try MessageEventGUID(text)))
+            #expect(identifier.bytes.elementsEqual(text.utf8))
+        }
+        for bytes in [Data(), Data([0xff]), Data([0xc0, 0xaf]), Data([0, 65]),
+                      Data("\u{feff}target".utf8), Data("a\u{2029}b".utf8), Data(repeating: 65, count: 1_025)] {
+            #expect(throws: Failure.invalidIdentifier) { try MessageEventGUID(storedBytes: bytes) }
+        }
+    }
+
     @Test func identifierByteLimits() throws {
         #expect(try MessageEventGUID(String(repeating: "a", count: 1_024)).bytes.count == 1_024)
         #expect(try MessageEventGUID(String(repeating: "é", count: 512)).bytes.count == 1_024)

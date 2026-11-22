@@ -231,8 +231,8 @@ def render(path: tuple[str, ...], node: dict, inherited_keys: set[str],
     jc = rel_link(self_page, "reference/json-contract.md")
     ec = rel_link(self_page, "reference/exit-codes.md")
     L += ["## Output", "",
-          "`stdout` carries the JSON envelope; `stderr` carries human text. "
-          f"See [the JSON contract]({jc}) and [exit codes]({ec}).", ""]
+          extra.get("output", "`stdout` carries the JSON envelope; `stderr` carries human text.")
+          + f" See [the JSON contract]({jc}) and [exit codes]({ec}).", ""]
 
     # See also links the PARENT only. Listing every sibling buries the useful link
     # under 40 entries on a domain like mail; the parent page already indexes them.

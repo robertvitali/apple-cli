@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- `apple messages watch` streams change metadata as NDJSON and resumes from a saved cursor.
+  Records omit message bodies and include exact conversation and message identifiers.
+  Event streams can be listed with retention details and retired by
+  exact stream ID. Retirement supports a dry-run preview of local journal files.
 - Experimental [exact-part editing](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/edit.md)
   previews replacement text and checks own-message eligibility, protects existing
   drafts, and verifies persisted content and edit history in both worker and

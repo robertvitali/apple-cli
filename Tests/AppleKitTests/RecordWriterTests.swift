@@ -6,7 +6,7 @@ import Testing
 private final class RecordIOFixture: RecordWriterIO, @unchecked Sendable {
     enum Step { case count(Int), failure(Int32) }
     var type = mode_t(S_IFREG)
-    var flags = O_WRONLY
+    var flags = O_WRONLY | O_NONBLOCK
     var socket = SOCK_STREAM
     var ignored = true
     var protection: Int32 = 0
@@ -40,6 +40,9 @@ private final class RecordIOFixture: RecordWriterIO, @unchecked Sendable {
     func socketType(_ descriptor: Int32) -> Result<Int32, RecordWriterSystemError> { answer("socket", socket) }
     func ignoresSIGPIPE() -> Result<Bool, RecordWriterSystemError> { answer("signal", ignored) }
     func noSIGPIPE(_ descriptor: Int32) -> Result<Int32, RecordWriterSystemError> { answer("protection", protection) }
+    func monitorBlockingPipe(_ descriptor: Int32) -> Result<RecordWriterPipeMonitor, RecordWriterSystemError> {
+        .failure(.init(code: failureCode))
+    }
     func pipeAtomicLimit(_ descriptor: Int32) -> Result<Int, RecordWriterSystemError> { answer("limit", atomicLimit) }
     func pollWritable(_ descriptor: Int32, milliseconds: Int32) -> Result<Int16?, RecordWriterSystemError> {
         calls.append("poll")
@@ -101,6 +104,15 @@ struct RecordWriterTests {
         failure(reason, errno: EIO) { _ = try RecordWriter(borrowing: 12, io: io) }
         #expect(io.closeCount == (operation == "duplicate" ? 0 : 1))
         #expect(io.minimum == 3)
+    }
+
+    @Test func failedBlockingPipeMonitorClosesDuplicateBeforeAnyWrite() {
+        let io = RecordIOFixture()
+        io.type = mode_t(S_IFIFO)
+        io.flags = O_WRONLY
+        failure(.unsupportedDescriptor, errno: io.failureCode) { _ = try RecordWriter(borrowing: 4, io: io) }
+        #expect(io.closeCount == 1)
+        #expect(io.requests.isEmpty)
     }
 
     @Test(arguments: [EBADF, EMFILE, ENFILE])

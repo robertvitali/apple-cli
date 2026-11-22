@@ -398,10 +398,14 @@ private func partialFIFO(root: URL, mode: String) throws -> String {
         return "threshold-unavailable\n"
     }
     try require(attempted == -1 && (failure == EAGAIN || failure == EWOULDBLOCK))
+    if mode.hasPrefix("blocking-") {
+        let flags = fcntl(fixture.original, F_GETFL)
+        try require(flags >= 0 && fcntl(fixture.original, F_SETFL, flags & ~O_NONBLOCK) == 0)
+    }
     let before = try fixture.snapshot()
     let writer = try RecordWriter(borrowing: fixture.original)
     try before.verify(fixture.original)
-    if mode == "partial-fifo-drain" {
+    if mode.hasSuffix("-drain") {
         let started = DispatchSemaphore(value: 0)
         let finished = DispatchSemaphore(value: 0)
         let result = DrainResult()
@@ -438,7 +442,7 @@ private func partialFIFO(root: URL, mode: String) throws -> String {
         expected.append(framed(record))
         try require(received == expected)
     } else {
-        let cancel = mode == "partial-fifo-cancel"
+        let cancel = mode.hasSuffix("-cancel")
         let start = ContinuousClock.now
         let error = try expectFailure(writer, record: record,
                                       deadline: start.advanced(by: cancel ? .seconds(1) : .milliseconds(180)),
@@ -476,8 +480,24 @@ private func run(_ mode: String, root: URL) throws -> String {
     case "full-fifo-cancel": try backpressure(.fifo, root: root, cancel: true)
     case "full-socket-timeout": try backpressure(.socket, root: root, cancel: false)
     case "full-socket-cancel": try backpressure(.socket, root: root, cancel: true)
+    case "closed-input-pipe":
+        let owned = Descriptors()
+        let fixture = try StreamFixture(.pipe, root: root, owned: owned)
+        try fixture.protect()
+        try require(Darwin.close(STDIN_FILENO) == 0)
+        let writer = try RecordWriter(borrowing: fixture.original)
+        try require(fcntl(STDIN_FILENO, F_GETFD) == -1 && errno == EBADF)
+        let nextInput = open("/dev/null", O_RDONLY | O_CLOEXEC)
+        defer { if nextInput >= 0 { _ = Darwin.close(nextInput) } }
+        try require(nextInput == STDIN_FILENO)
+        try writer.writeRecord(smallRecord, deadline: .now.advanced(by: .seconds(1)))
+        try writer.close()
+        try require(fcntl(nextInput, F_GETFD) >= 0)
+        try owned.close(fixture.original)
+        try require(try readToEOF(fixture.reader, maximum: framed(smallRecord).count) == framed(smallRecord))
     case "close-reuse": try closeReuse(root: root)
-    case "partial-fifo-timeout", "partial-fifo-cancel", "partial-fifo-drain":
+    case "partial-fifo-timeout", "partial-fifo-cancel", "partial-fifo-drain",
+         "blocking-partial-fifo-timeout", "blocking-partial-fifo-cancel", "blocking-partial-fifo-drain":
         return try partialFIFO(root: root, mode: mode)
     default: throw ProbeFailure.check
     }
