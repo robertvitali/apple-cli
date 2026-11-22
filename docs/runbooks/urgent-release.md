@@ -623,8 +623,8 @@ jobs:
         run: |
           set -euo pipefail
           [ "$(uname -m)" = arm64 ] || { echo "::error::expected an arm64 runner for the -arm64 asset"; exit 1; }
-          swift build -c release -Xswiftc -gnone
-          bin="$(swift build -c release -Xswiftc -gnone --show-bin-path)/apple"
+          swift build -c release -Xswiftc -gnone -Xlinker -S
+          bin="$(swift build -c release -Xswiftc -gnone -Xlinker -S --show-bin-path)/apple"
           [ "$("$bin" --version)" = "$NEW" ] || { echo "::error::the built binary does not report the release version"; exit 1; }
           echo "bin=$bin" >> "$GITHUB_OUTPUT"
 

@@ -832,7 +832,7 @@ class SwiftInvocationTests(TempCase):
             tools.run_version(self.tmp / "apple", self.tmp)
         (build, build_env, build_options), (show, show_env, show_options), (_, version_env, version_options) = captured
         self.assertEqual(show, build + ["--show-bin-path"])
-        self.assertEqual(build[:7], ["/usr/bin/swift", "build", "-c", "release", "--disable-automatic-resolution", "-Xswiftc", "-gnone"])
+        self.assertEqual(build[:9], ["/usr/bin/swift", "build", "-c", "release", "--disable-automatic-resolution", "-Xswiftc", "-gnone", "-Xlinker", "-S"])
         for flag, leaf in (("--cache-path", "cache"), ("--config-path", "config"), ("--security-path", "security")):
             self.assertEqual(build[build.index(flag) + 1], str(work / "swiftpm" / leaf))
         for command in (build, show):
@@ -2199,7 +2199,7 @@ class RunbookParityTests(unittest.TestCase):
                        if line.strip().startswith("swift build ") and "--show-bin-path" not in line]
         self.assertEqual(len(build_lines), 1, build_lines)
         flags = shlex.split(build_lines[0])[2:]
-        self.assertEqual(flags, ["-c", "release", "-Xswiftc", "-gnone"])
+        self.assertEqual(flags, ["-c", "release", "-Xswiftc", "-gnone", "-Xlinker", "-S"])
         pairs = list(zip(artifact.BUILD_ARGUMENTS, artifact.BUILD_ARGUMENTS[1:]))
         for pair in zip(flags[0::2], flags[1::2]):
             self.assertIn(pair, pairs)

@@ -22,7 +22,7 @@ WHERE IT RUNS. The hosted `release-prep-rehearsal` job of `.github/workflows/doc
 routine run. The job runs it only when release preparation rendered the two files, so the
 release commit itself (nothing to release) is never built there. Running it on the operator's
 Mac is a native release build and needs an operator grant (HUMAN-DECISIONS D23); it is not a
-"runs freely" rehearsal. The recipe (the runbook's `-Xswiftc -gnone`; no strip, no re-sign,
+"runs freely" rehearsal. The recipe (the runbook's `-Xswiftc -gnone -Xlinker -S`; no strip, no re-sign,
 no prefix maps), the linkage rule and the path-prefix classes below are the project's
 definitions, ratified in HUMAN-DECISIONS D51 on 2026-10-10 (UTC).
 
@@ -68,7 +68,7 @@ Steps, in order. Each fails closed, and a failed step leaves every later check `
     needs no change (design section 14.2's third file class).
 7.  `deployment-minimum`: exactly one `.macOS(.vNN)` / `.macOS(.vNN_M)` inside the
     `platforms:` argument of `Package.swift` names the expected deployment minimum.
-8.  `build`: `/usr/bin/swift build -c release --disable-automatic-resolution -Xswiftc -gnone`
+8.  `build`: `/usr/bin/swift build -c release --disable-automatic-resolution -Xswiftc -gnone -Xlinker -S`
     with SwiftPM's `--cache-path`, `--config-path` and `--security-path` under `<work>/swiftpm`
     and `--disable-netrc` and `--disable-keychain`, then the identical flags plus
     `--show-bin-path`; `.build` must be a real directory and the binary a regular file inside
@@ -317,7 +317,8 @@ NM = "/usr/bin/nm"
 CODESIGN = "/usr/bin/codesign"
 TAR = "/usr/bin/tar"
 SHASUM = "/usr/bin/shasum"
-BUILD_ARGUMENTS: Tuple[str, ...] = ("build", "-c", "release", "--disable-automatic-resolution", "-Xswiftc", "-gnone")
+# Suppress debug-map entries at link time for every object, including C targets.
+BUILD_ARGUMENTS: Tuple[str, ...] = ("build", "-c", "release", "--disable-automatic-resolution", "-Xswiftc", "-gnone", "-Xlinker", "-S")
 SWIFTPM_CREDENTIAL_FLAGS: Tuple[str, ...] = ("--disable-netrc", "--disable-keychain")
 TAR_FLAGS: Tuple[str, ...] = ("--uid", "0", "--gid", "0", "--uname", "", "--gname", "", "--no-xattrs", "--no-acls",
                               "--no-fflags")
