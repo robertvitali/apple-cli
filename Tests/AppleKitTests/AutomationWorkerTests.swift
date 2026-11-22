@@ -580,6 +580,19 @@ struct AutomationWorkerTests {
         #expect(outcome == "protocolViolation(journal-binding)")
     }
 
+    @Test(arguments: ["operationID", "nonce"])
+    func workerRejectsSuffixAfterUUID(_ field: String) throws {
+        #expect(try directProtocolOutcome("suffix-" + field) == "exit(70)|response=none")
+        let root = try scratch.directory().appendingPathComponent("uuid-" + field, isDirectory: true)
+        let outcome = try launchThroughProbeParent(root: root, command: "probe.suffix-" + field)
+        #expect(outcome == "protocolViolation(malformed-frame)")
+        try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
+            let snapshot = try lease.loadSnapshot()
+            #expect(snapshot.pending?.phase == .uncertainAfterHandoff)
+            #expect(snapshot.receipts.isEmpty)
+        }
+    }
+
     @Test("worker main rejects request trailing bytes and stale parent identity")
     func workerMainRejectsMalformedOrStaleParentRequest() throws {
         #expect(try directProtocolOutcome("trailing") == "exit(70)|response=none")
@@ -674,6 +687,14 @@ struct AutomationWorkerTests {
         let root = try scratch.directory().appendingPathComponent("observed-noop-\(UUID().uuidString)", isDirectory: true)
         let noop = try launchObservedThroughProbe(root: root, command: "probe.noop", seed: "noop")
         #expect(noop == "alreadyInDesiredState(already-desired)|pending=none|receipts=none")
+    }
+
+    @Test(arguments: ["probe.resolve-lock-drift", "probe.noop-lock-drift"])
+    func observedActionRefusesStaleLockBeforeReportingNoOp(command: String) throws {
+        let root = try scratch.directory().appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let result = try launchObservedThroughProbe(root: root, command: command, seed: "stale-lock")
+        #expect(result == "requestNotSent(unsafe-state-file)|pending=none|receipts=none")
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("preflight-entered").path))
     }
 
     @Test("observed action retains uncertainty when worker or verifier cannot prove success")

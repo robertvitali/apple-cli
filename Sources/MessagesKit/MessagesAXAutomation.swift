@@ -552,7 +552,7 @@ struct MessagesReactionAXAutomation {
         }
     }
 
-    private static func reactionError(from error: MessagesAXNavigationError) -> MessagesReactionAXError {
+    fileprivate static func reactionError(from error: MessagesAXNavigationError) -> MessagesReactionAXError {
         switch error {
         case .deadlineExpired: return .deadlineExpired
         case .targetDrift: return .targetDrift
@@ -1909,6 +1909,20 @@ final class LiveMessagesReactionAXDriver: MessagesReactionAXDriving {
         return identity
     }
 
+    static func checkSessionBeforeOpen(_ session: NSDictionary?) throws {
+        do { try checkMessagesAXSession(session) }
+        catch { throw MessagesReactionAXAutomation.reactionError(from: error) }
+    }
+
+    static func checkWindowsBeforeOpen(root: any MessagesAXElement, deadline: WorkerDeadline) throws {
+        // A locked desktop can list the application itself as a window.
+        // Refuse that response before LaunchServices receives the navigation URL.
+        let windows = try root.directWindows(limit: 256, deadline: deadline)
+        guard !windows.contains(where: { root.sameIdentity(as: $0) }) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+    }
+
     private final class OpenResult: @unchecked Sendable {
         private let lock = NSLock()
         private var result: Result<MessagesAXProcessIdentity, MessagesReactionAXError>?
@@ -1927,10 +1941,15 @@ final class LiveMessagesReactionAXDriver: MessagesReactionAXDriving {
         }
         let existing = try NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).map(identity)
         guard existing.count <= 1 else { throw MessagesReactionAXError.targetDrift }
+        if let running = existing.first {
+            let root = LiveAXElement(element: AXUIElementCreateApplication(running.pid))
+            try Self.checkWindowsBeforeOpen(root: root, deadline: deadline)
+        }
         let result = OpenResult()
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.createsNewApplicationInstance = false
+        try Self.checkSessionBeforeOpen(CGSessionCopyCurrentDictionary() as NSDictionary?)
         try checkDeadline(deadline)
         NSWorkspace.shared.open([url], withApplicationAt: Self.applicationURL, configuration: configuration) { app, error in
             guard error == nil, let app, !app.isTerminated, app.bundleIdentifier == Self.bundleIdentifier,
@@ -2174,7 +2193,7 @@ enum MessagesPairedKeyPressError: Error {
 }
 
 struct PairedMessagesKeyPress {
-    let postDown: () -> Void
+    let postDown: (WorkerDeadline) throws -> Void
     let postUp: () -> Void
     let postRequiredExtraKeyUp: () -> Void
 }
@@ -2209,7 +2228,7 @@ struct LiveMessagesPairedKeyPresser {
         let pairedKeyPress = try makePairedKeyPress(code, pid, flags)
         let action = {
             try checkPairedKeyDeadline(deadline)
-            pairedKeyPress.postDown()
+            try pairedKeyPress.postDown(deadline)
             pairedKeyPress.postUp()
             if self.operatingSystemMajorVersion() >= 15 {
                 pairedKeyPress.postRequiredExtraKeyUp()
@@ -2249,7 +2268,13 @@ struct LiveMessagesPairedKeyPresser {
             upEvent.flags = explicit
         }
         return PairedMessagesKeyPress(
-            postDown: { downEvent.postToPid(pid) },
+            postDown: { deadline in
+                // Check on the posting thread. Once down is sent, finish its paired releases.
+                do { try checkMessagesAXSession(CGSessionCopyCurrentDictionary() as NSDictionary?) }
+                catch { throw MessagesPairedKeyPressError.axFailure }
+                try checkPairedKeyDeadline(deadline)
+                downEvent.postToPid(pid)
+            },
             postUp: { upEvent.postToPid(pid) },
             postRequiredExtraKeyUp: {
                 upEvent.flags = []

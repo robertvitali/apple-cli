@@ -530,6 +530,25 @@ struct MessagesReactionAXAutomationTests {
         #expect(throws: (any Error).self) { try LiveMessagesReactionAXDriver.uniqueIdentity([wrongBundle]) }
     }
 
+    @Test(arguments: [false, true])
+    func navigationRefusesApplicationListedAsWindow(_ hasOtherWindow: Bool) {
+        let root = FakeAXNode(role: "AXApplication")
+        let window = FakeAXNode(role: "AXWindow")
+        root.directWindowNodes = hasOtherWindow ? [window, root] : [root]
+        defer { root.directWindowNodes = nil }
+        #expect(throws: MessagesReactionAXError.targetDrift) {
+            try LiveMessagesReactionAXDriver.checkWindowsBeforeOpen(root: root, deadline: .millisecondsFromNow(1_000))
+        }
+    }
+
+    @Test func navigationAcceptsEmptyAndDistinctWindowLists() throws {
+        let root = FakeAXNode(role: "AXApplication")
+        for windows in [[], [FakeAXNode(role: "AXWindow")]] {
+            root.directWindowNodes = windows
+            try LiveMessagesReactionAXDriver.checkWindowsBeforeOpen(root: root, deadline: .millisecondsFromNow(1_000))
+        }
+    }
+
     @Test func customChooserWindowPointsUseOnlyStrictOwnedVisibleWindowMetadata() throws {
         let points = try LiveMessagesReactionAXDriver.customChooserWindowPoints(
             [customChooserCGWindowInfo()] as CFArray, pid: 123)
@@ -545,6 +564,22 @@ struct MessagesReactionAXAutomationTests {
             [customChooserCGWindowInfo(bounds: customChooserCGWindowBounds(width: 299))] as CFArray, pid: 123).isEmpty)
         #expect(try LiveMessagesReactionAXDriver.customChooserWindowPoints(
             [customChooserCGWindowInfo(bounds: customChooserCGWindowBounds(height: 561))] as CFArray, pid: 123).isEmpty)
+    }
+
+    @Test func navigationChecksTheSessionEvenWithoutAnExistingWindow() throws {
+        try LiveMessagesReactionAXDriver.checkSessionBeforeOpen([:])
+        try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(["CGSSessionScreenIsLocked": false])
+        #expect(throws: MessagesReactionAXError.targetDrift) {
+            try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(["CGSSessionScreenIsLocked": true])
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(nil)
+        }
+        for invalid: Any in [NSNumber(value: 1), "false", NSNull()] {
+            #expect(throws: MessagesReactionAXError.unknownAXValue) {
+                try LiveMessagesReactionAXDriver.checkSessionBeforeOpen(["CGSSessionScreenIsLocked": invalid])
+            }
+        }
     }
 
     @Test func customChooserWindowPointsFailClosedOnMalformedWindowMetadata() throws {
@@ -1191,7 +1226,7 @@ struct MessagesReactionAXAutomationTests {
             makePairedKeyPress: { code, pid, flags in
                 calls.append((code, pid, flags))
                 return PairedMessagesKeyPress(
-                    postDown: { events.append("down") },
+                    postDown: { _ in events.append("down") },
                     postUp: { events.append("up") },
                     postRequiredExtraKeyUp: { events.append("extra-up") }
                 )
@@ -1215,7 +1250,7 @@ struct MessagesReactionAXAutomationTests {
             operatingSystemMajorVersion: { 15 },
             makePairedKeyPress: { _, _ in
                 PairedCustomEmojiKeyPress(
-                    postDown: {
+                    postDown: { _ in
                         events.append("down")
                         Thread.sleep(forTimeInterval: Double(deadline.remainingNanoseconds) / 1_000_000_000 + 0.005)
                     },
@@ -1229,6 +1264,19 @@ struct MessagesReactionAXAutomationTests {
             try presser.press(.returnKey, deadline: deadline)
         }
         #expect(events == ["down", "up", "extra-up"])
+    }
+
+    @Test func refusedKeyDownNeverPostsItsPairedReleases() throws {
+        var events: [String] = []
+        let presser = LiveMessagesPairedKeyPresser(pid: 17, operatingSystemMajorVersion: { 15 },
+            makePairedKeyPress: { _, _, _ in
+                PairedMessagesKeyPress(postDown: { _ in throw MessagesPairedKeyPressError.axFailure },
+                    postUp: { events.append("up") }, postRequiredExtraKeyUp: { events.append("extra-up") })
+            })
+        #expect(throws: MessagesPairedKeyPressError.axFailure) {
+            try presser.pressReturn(flags: .cleared, deadline: .millisecondsFromNow(2000))
+        }
+        #expect(events.isEmpty)
     }
 
     @Test func customChooserUsesBoundedBeeperKeySequenceForIndexedResult() throws {

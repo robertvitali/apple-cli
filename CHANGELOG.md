@@ -686,6 +686,8 @@ JSON output are stable per the versioning policy — breaking changes bump
 - Exact Messages lookups and history cursors now compare GUID bytes. Case,
   trailing spaces and Unicode normalization can no longer select a different target.
   A leading U+FEFF in a stored GUID now survives exact Messages reads and pagination.
+- Messages automation rejects altered operation identifiers in its journal and worker messages before accepting recovery or completion.
+- Messages automation rejects a named pipe in place of its state file without waiting for a writer. Concurrent first use can share the newly created journal directory.
 
 - Attachment reply verification preserves the distinction between SQL NULL and
   an empty BLOB. When the verifier needs a body field and finds an empty BLOB,
@@ -693,6 +695,11 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 - Reply verification excludes messages already present during preflight, even
   when their conversation link is added after the send.
+
+- Messages automation rechecks ownership of its journal lock before using it.
+  A waiter whose deadline expires stops before accessing the journal. A reported
+  console lock stops navigation, Accessibility changes and new keyboard presses.
+  Keys already pressed receive their release events.
 
 - Messages attachment checks now refuse symlink ancestors when a filename begins
   with a Unicode combining mark, including during attachment reply verification.
@@ -702,6 +709,10 @@ JSON output are stable per the versioning policy — breaking changes bump
   error. Diagnostics contain no target values or native error text and do not
   establish whether a download occurred. Success verification and the single
   native-action limit are unchanged; uncertain results still require inspection.
+
+- Messages checks the running app’s window list before opening a navigation link.
+  If Accessibility returns the application itself as a window, navigation stops
+  before the link is submitted. This response was observed on a locked desktop.
 
 - **Messages reaction writes now tolerate a short initial native-open selection
   delay before opening the Tapback menu.** After a single exact native URL open,

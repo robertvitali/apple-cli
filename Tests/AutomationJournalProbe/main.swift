@@ -179,6 +179,15 @@ do {
         } catch ExistingEventJournalLease.Failure.busy {
             finish(.eventLeaseBusy)
         }
+    case "reject-unsafe-state":
+        do {
+            try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(1_000)) {
+                _ = try $0.loadSnapshot()
+            }
+            finish(.unexpectedError)
+        } catch AppleAutomationJournal.Error.unsafeStateFile {
+            Darwin.exit(EXIT_SUCCESS)
+        }
     case "lock-probe":
         try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(50)) { _ in }
         finish(.acquiredUnexpectedly)

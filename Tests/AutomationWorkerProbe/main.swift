@@ -11,6 +11,13 @@ struct ProbeOperation: WorkerOperation {
         case "probe.empty":
             let extraDescriptors = (3..<64).filter { fcntl(Int32($0), F_GETFD) >= 0 }
             return extraDescriptors.count == 2 ? .ack : .failed
+        case "probe.suffix-operationID", "probe.suffix-nonce":
+            guard InternalWorkerMain.isWorkerInvocation(CommandLine.arguments),
+                  let fd = Int32(CommandLine.arguments[5]) else { exit(71) }
+            let response = WorkerResponse(schemaVersion: 1, operationID: request.operationID, nonce: request.nonce, category: .ack)
+            let field = String(request.command.name.dropFirst("probe.suffix-".count))
+            let bytes = try addingUUIDSuffix(to: JSONEncoder().encode(response), field: field)
+            exit(writeAll(fd, framed(bytes), until: .now() + .seconds(1)) ? 0 : 71)
         case "probe.sleep":
             Thread.sleep(forTimeInterval: 2.0)
             return .ack
@@ -116,6 +123,10 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
     }
     let cancelMarker = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("cancel-now").path
     let verifyMarker = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("verify-entered").path
+    func moveFixtureLock() throws {
+        let lock = URL(fileURLWithPath: root).appendingPathComponent(AppleAutomationJournal.lockFileName)
+        try FileManager.default.moveItem(at: lock, to: lock.appendingPathExtension("retained"))
+    }
     return WorkerObservedAction(
         stateRoot: root,
         deadline: deadline,
@@ -123,6 +134,7 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
             commandName == "probe.cancel-immediate" || FileManager.default.fileExists(atPath: cancelMarker)
         },
         resolve: {
+            if commandName == "probe.resolve-lock-drift" { try moveFixtureLock() }
             if commandName == "probe.resolve-cancel" { throw WorkerProtocolError.cancelled }
             return try WorkerResolvedAction(
                 target: binding(seed, operationType: observedOperationType(commandName: commandName)),
@@ -149,6 +161,14 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
             }
             if commandName == "probe.preflight-sleep" {
                 Thread.sleep(forTimeInterval: 0.35)
+            }
+            if commandName == "probe.resolve-lock-drift" {
+                try Data().write(to: URL(fileURLWithPath: root).appendingPathComponent("preflight-entered"))
+                return .alreadyInDesiredState("preflight-entered")
+            }
+            if commandName == "probe.noop-lock-drift" {
+                try moveFixtureLock()
+                return .alreadyInDesiredState("stale-observation")
             }
             if commandName == "probe.noop" {
                 return .alreadyInDesiredState("already-desired")
@@ -469,6 +489,13 @@ func statusDescription(_ status: Int32?) -> String {
     return "signal(\(status & 0x7f))"
 }
 
+private func addingUUIDSuffix(to frame: Data, field: String) throws -> Data {
+    guard var object = try JSONSerialization.jsonObject(with: frame) as? [String: Any],
+          let original = object[field] as? String else { throw WorkerProtocolError.malformedFrame }
+    object[field] = original + "\0synthetic"
+    return try JSONSerialization.data(withJSONObject: object)
+}
+
 func runDirectProtocolProbe(_ mode: String, scratchParent: String?) throws -> String {
     guard var parent = currentProcessIdentity() else { return "identity-unavailable" }
     var executable = executableIdentity(from: parent)
@@ -491,6 +518,8 @@ func runDirectProtocolProbe(_ mode: String, scratchParent: String?) throws -> St
         workerPath = try copyExecutable(parent: scratchParent)
         commandName = "probe.crash"
         needsChildExecutableIdentity = true
+    case "suffix-operationID", "suffix-nonce":
+        commandName = "probe.empty"
     case "invalid-command":
         commandName = "bad command"
     case "trailing":
@@ -534,7 +563,9 @@ func runDirectProtocolProbe(_ mode: String, scratchParent: String?) throws -> St
                                   deadline: .millisecondsFromNow(1_000), parent: parent,
                                   workerExecutable: executable,
                                   command: ProbeCommandFrame(name: commandName, payload: nil))
-    var bytes = framed(try JSONEncoder().encode(frame))
+    var encoded = try JSONEncoder().encode(frame)
+    if mode.hasPrefix("suffix-") { encoded = try addingUUIDSuffix(to: encoded, field: String(mode.dropFirst(7))) }
+    var bytes = framed(encoded)
     if trailing { bytes.append(0xff) }
     let deadline = DispatchTime.now() + 2.0
     guard writeAll(req[1], bytes, until: deadline) else {

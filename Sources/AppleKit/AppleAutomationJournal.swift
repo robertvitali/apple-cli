@@ -190,11 +190,12 @@ public enum AppleAutomationJournal {
     }
 
     public final class JournalLease {
-        private let rootFD: Int32
+        private let handles: Handles
+        private var rootFD: Int32 { handles.rootFD }
         private let checkpointHook: WriteCheckpointHook?
         private var active = true
-        fileprivate init(rootFD: Int32, checkpointHook: WriteCheckpointHook? = nil) {
-            self.rootFD = rootFD
+        fileprivate init(handles: Handles, checkpointHook: WriteCheckpointHook?) {
+            self.handles = handles
             self.checkpointHook = checkpointHook
         }
         deinit { active = false }
@@ -320,8 +321,14 @@ public enum AppleAutomationJournal {
             snapshot.receipts.contains { $0.operationID == operationID }
         }
 
-        private func requireActive() throws {
+        func requireActive() throws {
             guard active else { throw Error.leaseExpired }
+            do {
+                try handles.validateIdentity()
+            } catch {
+                active = false
+                throw error
+            }
         }
     }
 
@@ -329,35 +336,51 @@ public enum AppleAutomationJournal {
                                             deadline: MonotonicDeadline,
                                             isCancelled: () -> Bool = { false },
                                             _ body: (JournalLease) throws -> T) throws -> T {
-        let handles = try openRootAndLock(root: root)
-        defer {
-            _ = flock(handles.lockFD, LOCK_UN)
-            close(handles.lockFD)
-            close(handles.rootFD)
-        }
-        try acquireLock(handles.lockFD, deadline: deadline, isCancelled: isCancelled)
-        let lease = JournalLease(rootFD: handles.rootFD)
-        defer { lease.expire() }
-        return try body(lease)
+        try withLockedJournal(root: root, deadline: deadline, isCancelled: isCancelled, checkpointHook: nil, body)
     }
 
     package static func withLockedJournalForCheckpointTesting<T>(root: String,
                                                                   deadline: MonotonicDeadline,
                                                                   checkpointHook: WriteCheckpointHook,
                                                                   _ body: (JournalLease) throws -> T) throws -> T {
+        try withLockedJournal(root: root, deadline: deadline, isCancelled: { false }, checkpointHook: checkpointHook, body)
+    }
+
+    private static func withLockedJournal<T>(root: String, deadline: MonotonicDeadline,
+                                              isCancelled: () -> Bool, checkpointHook: WriteCheckpointHook?,
+                                              _ body: (JournalLease) throws -> T) throws -> T {
+        func checkAdmission() throws {
+            if isCancelled() { throw Error.cancelled }
+            if deadline.expired { throw Error.lockTimedOut }
+        }
+        try checkAdmission()
         let handles = try openRootAndLock(root: root)
         defer {
             _ = flock(handles.lockFD, LOCK_UN)
             close(handles.lockFD)
             close(handles.rootFD)
         }
-        try acquireLock(handles.lockFD, deadline: deadline, isCancelled: { false })
-        let lease = JournalLease(rootFD: handles.rootFD, checkpointHook: checkpointHook)
+        try acquireLock(handles.lockFD, checkAdmission: checkAdmission)
+        // The names and permissions may have changed while waiting on the descriptor.
+        try handles.validateIdentity()
+        try checkAdmission()
+        let lease = JournalLease(handles: handles, checkpointHook: checkpointHook)
         defer { lease.expire() }
         return try body(lease)
     }
 
-    private struct Handles { let rootFD: Int32; let lockFD: Int32 }
+    fileprivate struct Handles {
+        let root: String
+        let rootFD: Int32
+        let lockFD: Int32
+
+        func validateIdentity() throws {
+            var named = stat()
+            guard lstat(root, &named) == 0 else { throw Error.unsafeStateDirectory }
+            try validateDirectoryFD(rootFD, matches: named)
+            try validateFileFD(lockFD, rootFD: rootFD, name: lockFileName)
+        }
+    }
 
     private static func openRootAndLock(root: String) throws -> Handles {
         try ensureRootDirectory(root)
@@ -368,7 +391,7 @@ public enum AppleAutomationJournal {
         do {
             try validateDirectoryFD(rootFD, matches: pathStat)
             let lockFD = try openLock(rootFD: rootFD)
-            return Handles(rootFD: rootFD, lockFD: lockFD)
+            return Handles(root: root, rootFD: rootFD, lockFD: lockFD)
         } catch {
             close(rootFD)
             throw error
@@ -379,7 +402,7 @@ public enum AppleAutomationJournal {
         var st = stat()
         if lstat(root, &st) != 0 {
             guard errno == ENOENT else { throw Error.unsafeStateDirectory }
-            guard mkdir(root, 0o700) == 0 else { throw Error.syscall("mkdir") }
+            guard mkdir(root, 0o700) == 0 || errno == EEXIST else { throw Error.syscall("mkdir") }
             guard lstat(root, &st) == 0 else { throw Error.unsafeStateDirectory }
         }
         guard (st.st_mode & S_IFMT) == S_IFDIR else { throw Error.unsafeStateDirectory }
@@ -403,16 +426,8 @@ public enum AppleAutomationJournal {
         else if errno == EEXIST { fd = openat(rootFD, lockFileName, O_RDWR | O_CLOEXEC | O_NOFOLLOW) }
         guard fd >= 0 else { throw Error.unsafeStateFile }
         do {
-            var pathStat = stat()
-            guard fstatat(rootFD, lockFileName, &pathStat, AT_SYMLINK_NOFOLLOW) == 0 else { throw Error.unsafeStateFile }
-            var st = stat()
-            guard fstat(fd, &st) == 0 else { throw Error.unsafeStateFile }
-            guard st.st_dev == pathStat.st_dev, st.st_ino == pathStat.st_ino else { throw Error.unsafeStateFile }
-            guard st.st_nlink == 1 else { throw Error.unsafeStateFile }
-            guard (st.st_mode & S_IFMT) == S_IFREG else { throw Error.unsafeStateFile }
-            guard st.st_uid == getuid() else { throw Error.unsafeStateFile }
+            try validateFileFD(fd, rootFD: rootFD, name: lockFileName, checkMode: !created)
             if created { guard fchmod(fd, 0o600) == 0 else { throw Error.syscall("fchmod") } }
-            else { guard (st.st_mode & 0o777) == 0o600 else { throw Error.unsafeStateFile } }
             return fd
         } catch {
             close(fd)
@@ -420,24 +435,24 @@ public enum AppleAutomationJournal {
         }
     }
 
-    private static func acquireLock(_ fd: Int32, deadline: MonotonicDeadline, isCancelled: () -> Bool) throws {
+    private static func acquireLock(_ fd: Int32, checkAdmission: () throws -> Void) throws {
         while true {
-            if isCancelled() { throw Error.cancelled }
+            try checkAdmission()
             if flock(fd, LOCK_EX | LOCK_NB) == 0 { return }
             guard errno == EWOULDBLOCK else { throw Error.syscall("flock") }
-            if deadline.expired { throw Error.lockTimedOut }
             usleep(10_000)
         }
     }
 
     private static func readSnapshot(rootFD: Int32) throws -> Snapshot {
-        let fd = openat(rootFD, stateFileName, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        // A FIFO can block inside open, before the descriptor's type can be verified.
+        let fd = openat(rootFD, stateFileName, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW)
         if fd < 0 {
             guard errno == ENOENT else { throw Error.unsafeStateFile }
             return Snapshot()
         }
         defer { close(fd) }
-        try validateStateFD(fd, rootFD: rootFD)
+        try validateFileFD(fd, rootFD: rootFD, name: stateFileName)
         var st = stat()
         guard fstat(fd, &st) == 0 else { throw Error.unsafeStateFile }
         guard st.st_size <= maxStateBytes else { throw Error.malformedState }
@@ -453,16 +468,16 @@ public enum AppleAutomationJournal {
         return try decodeSnapshot(data)
     }
 
-    private static func validateStateFD(_ fd: Int32, rootFD: Int32) throws {
+    private static func validateFileFD(_ fd: Int32, rootFD: Int32, name: String, checkMode: Bool = true) throws {
         var pathStat = stat()
-        guard fstatat(rootFD, stateFileName, &pathStat, AT_SYMLINK_NOFOLLOW) == 0 else { throw Error.unsafeStateFile }
+        guard fstatat(rootFD, name, &pathStat, AT_SYMLINK_NOFOLLOW) == 0 else { throw Error.unsafeStateFile }
         var st = stat()
         guard fstat(fd, &st) == 0 else { throw Error.unsafeStateFile }
         guard st.st_dev == pathStat.st_dev, st.st_ino == pathStat.st_ino else { throw Error.unsafeStateFile }
         guard st.st_nlink == 1 else { throw Error.unsafeStateFile }
         guard (st.st_mode & S_IFMT) == S_IFREG else { throw Error.unsafeStateFile }
         guard st.st_uid == getuid() else { throw Error.unsafeStateFile }
-        guard (st.st_mode & 0o777) == 0o600 else { throw Error.unsafeStateFile }
+        guard !checkMode || (st.st_mode & 0o777) == 0o600 else { throw Error.unsafeStateFile }
     }
 
     private static func writeSnapshot(_ snapshot: Snapshot,
@@ -574,7 +589,7 @@ public enum AppleAutomationJournal {
     private static func decodePending(_ value: JSONValue) throws -> PendingOperation {
         guard case .object(let object) = value else { throw Error.malformedState }
         try requireKeys(object, exactly: ["operationID", "operationType", "conversationDigest", "messageDigest", "partDigest", "minimumEvidence", "phase", "createdMonotonicNanos"])
-        guard case .string(let operationIDString) = object["operationID"], let operationID = UUID(uuidString: operationIDString) else { throw Error.malformedState }
+        guard case .string(let operationIDString) = object["operationID"], let operationID = parseUUID(operationIDString) else { throw Error.malformedState }
         guard case .string(let opTypeRaw) = object["operationType"], let operationType = PendingOperation.OperationType(rawValue: opTypeRaw) else { throw Error.malformedState }
         let conversationDigest = try requiredDigest(object["conversationDigest"])
         let messageDigest = try optionalDigest(object["messageDigest"])
@@ -600,10 +615,16 @@ public enum AppleAutomationJournal {
     private static func decodeReceipt(_ value: JSONValue) throws -> Receipt {
         guard case .object(let object) = value else { throw Error.malformedState }
         try requireKeys(object, exactly: ["operationID", "disposition", "recordedMonotonicNanos"])
-        guard case .string(let operationIDString) = object["operationID"], let operationID = UUID(uuidString: operationIDString) else { throw Error.malformedState }
+        guard case .string(let operationIDString) = object["operationID"], let operationID = parseUUID(operationIDString) else { throw Error.malformedState }
         guard case .string(let dispositionRaw) = object["disposition"], let disposition = Receipt.Disposition(rawValue: dispositionRaw) else { throw Error.malformedState }
         guard case .number(let recorded) = object["recordedMonotonicNanos"], recorded >= 0 else { throw Error.malformedState }
         return Receipt(operationID: operationID, disposition: disposition, recordedMonotonicNanos: UInt64(recorded))
+    }
+
+    /// Foundation accepts a NUL and trailing bytes after an otherwise valid UUID.
+    package static func parseUUID(_ text: String) -> UUID? {
+        guard text.utf8.count == 36 else { return nil }
+        return UUID(uuidString: text)
     }
 
     private static func optionalDigest(_ value: JSONValue?) throws -> TargetDigest? {
@@ -757,7 +778,9 @@ private struct StrictJSONParser {
         while let b = peek() {
             index += 1
             if b == 0x22 {
-                guard let s = String(bytes: scalars, encoding: .utf8) else { throw AppleAutomationJournal.Error.malformedState }
+                guard let s = String(bytes: scalars, encoding: .utf8), s.utf8.elementsEqual(scalars) else {
+                    throw AppleAutomationJournal.Error.malformedState
+                }
                 return s
             }
             if b == 0x5c {

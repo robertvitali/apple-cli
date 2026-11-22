@@ -195,7 +195,10 @@ attempting a new write at each boundary.
 
 An advisory lock cannot exclude the user or unrelated automation. Bind exact
 database conversation/message/part identifiers plus process/window/route objects
-and revalidate immediately before every side effect; abort on drift. Reaction
+and revalidate immediately before every side effect. Abort on drift. Check the
+console session before navigation, AX actions, AX value changes and the initial
+keyboard post. A reported lock or unreadable session stops the handoff. Once
+a key-down is posted, deliver its required key-up events. Reaction
 writes additionally bind the parent ACK to the pending operation and require a
 fresh database read proving target identity and mutation eligibility before the
 parent records observed state.

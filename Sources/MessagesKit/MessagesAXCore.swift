@@ -218,6 +218,15 @@ enum MessagesAXRetainedRouteDiscovery {
     case unavailable(MessagesAXRouteDriftReason)
 }
 
+/// An unlocked console may omit the lock flag. Missing or ill-typed session
+/// evidence cannot authorize a handoff. Process and window checks still apply.
+func checkMessagesAXSession(_ session: NSDictionary?) throws(MessagesAXNavigationError) {
+    guard let session else { throw .unknownAXValue }
+    guard let value = session["CGSSessionScreenIsLocked"] else { return }
+    guard let flag = value as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { throw .unknownAXValue }
+    guard !flag.boolValue else { throw .targetDrift }
+}
+
 func checkMessagesAXDeadline(_ deadline: WorkerDeadline) throws {
     guard !deadline.expired else { throw MessagesAXNavigationError.deadlineExpired }
 }
@@ -691,15 +700,21 @@ final class LiveAXElement: MessagesAXElement {
         }
     }
 
-    func performAction(named name: String, deadline: WorkerDeadline) throws {
+    private func prepareMutation(_ deadline: WorkerDeadline) throws {
         try prepare(deadline)
+        try checkMessagesAXSession(CGSessionCopyCurrentDictionary() as NSDictionary?)
+        try checkMessagesAXDeadline(deadline)
+    }
+
+    func performAction(named name: String, deadline: WorkerDeadline) throws {
+        try prepareMutation(deadline)
         let status = AXUIElementPerformAction(element, name as CFString)
         try checkMessagesAXDeadline(deadline)
         guard status == .success else { throw MessagesAXNavigationError.axFailure }
     }
 
     func setValue(_ value: String, deadline: WorkerDeadline) throws {
-        try prepare(deadline)
+        try prepareMutation(deadline)
         let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
         try checkMessagesAXDeadline(deadline)
         guard status == .success else { throw MessagesAXNavigationError.axFailure }

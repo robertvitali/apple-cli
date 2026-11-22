@@ -84,6 +84,14 @@ package struct WorkerExecutableIdentity: Codable, Equatable, Sendable {
     }
 }
 
+private extension KeyedDecodingContainer {
+    func workerUUID(forKey key: Key) throws -> UUID {
+        let text = try decode(String.self, forKey: key)
+        guard let value = AppleAutomationJournal.parseUUID(text) else { throw WorkerProtocolError.malformedFrame }
+        return value
+    }
+}
+
 package struct WorkerRequest: Codable, Equatable, Sendable {
     package let schemaVersion: Int
     package let operationID: UUID
@@ -101,6 +109,17 @@ package struct WorkerRequest: Codable, Equatable, Sendable {
         self.parent = parent
         self.workerExecutable = workerExecutable
         self.command = command
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(schemaVersion: fields.decode(Int.self, forKey: .schemaVersion),
+                      operationID: fields.workerUUID(forKey: .operationID),
+                      nonce: fields.workerUUID(forKey: .nonce),
+                      deadline: fields.decode(WorkerDeadline.self, forKey: .deadline),
+                      parent: fields.decode(WorkerProcessIdentity.self, forKey: .parent),
+                      workerExecutable: fields.decode(WorkerExecutableIdentity.self, forKey: .workerExecutable),
+                      command: fields.decode(WorkerCommand.self, forKey: .command))
     }
 }
 
@@ -378,8 +397,8 @@ package struct WorkerResponse: Codable, Equatable, Sendable {
     package init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(schemaVersion: container.decode(Int.self, forKey: .schemaVersion),
-                      operationID: container.decode(UUID.self, forKey: .operationID),
-                      nonce: container.decode(UUID.self, forKey: .nonce),
+                      operationID: container.workerUUID(forKey: .operationID),
+                      nonce: container.workerUUID(forKey: .nonce),
                       category: container.decode(WorkerResponseCategory.self, forKey: .category),
                       detail: container.decodeIfPresent(String.self, forKey: .detail))
     }
@@ -971,13 +990,18 @@ package struct WorkerLauncher {
                 catch { return .requestNotSent(String(describing: error)) }
                 if let outcome = cancelledOrExpired() { return outcome }
                 let preflight: WorkerPreflightResult
-                do { preflight = try action.preflight(resolved, context()) }
+                do {
+                    try lease.requireActive()
+                    preflight = try action.preflight(resolved, context())
+                }
                 catch WorkerProtocolError.cancelled { return .cancelled }
                 catch WorkerProtocolError.deadlineExpired { return .timedOut }
                 catch { return .requestNotSent(String(describing: error)) }
                 switch preflight {
                 case .alreadyInDesiredState(let verification):
                     if let outcome = cancelledOrExpired() { return outcome }
+                    do { try lease.requireActive() }
+                    catch { return .requestNotSent(String(describing: error)) }
                     return .alreadyInDesiredState(verification)
                 case .requiresMutation:
                     break

@@ -299,6 +299,33 @@ struct AppleAutomationJournalTests {
         }
     }
 
+    @Test("malformed journal identity cannot be normalized during recovery", arguments: ["operationID", "phase", "digest", "pending"])
+    func recoveryPreservesAlteredState(field: String) throws {
+        try withScratch("altered-state") { root in
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
+                let id = try lease.begin(request())
+                try lease.markUncertainAfterHandoff(operationID: id)
+                let path = statePath(root)
+                let original = try String(contentsOf: path, encoding: .utf8)
+                let prefix: String
+                switch field {
+                case "operationID": prefix = id.uuidString
+                case "phase": prefix = "uncertainAfterHandoff"
+                case "digest": prefix = "sha256:"
+                default: prefix = "pending"
+                }
+                let changed = original.replacingOccurrences(of: "\"" + prefix, with: "\"\u{feff}" + prefix)
+                #expect(changed != original)
+                let bytes = Data(changed.utf8)
+                try bytes.write(to: path)
+                #expect(throws: AppleAutomationJournal.Error.self) {
+                    try lease.recover(operationID: id, acknowledgement: .init(operationID: id, lateEffectAcknowledged: true))
+                }
+                #expect(try Data(contentsOf: path) == bytes)
+            }
+        }
+    }
+
     @Test("strict JSON rejects unknown duplicate malformed too many and duplicate receipts")
         func testStrictJSONRejectsUnknownDuplicateMalformedTooManyAndDuplicateReceipts() throws {
         try withScratch("strict-json") { root in
@@ -326,6 +353,35 @@ struct AppleAutomationJournalTests {
                 do { _ = try lease.loadSnapshot(); throw TestFailure("receipt count limit should fail") }
                 catch AppleAutomationJournal.Error.malformedState {}
             }
+        }
+    }
+
+    @Test("a FIFO state file is refused without opening a writer")
+    func rejectsFIFOWithoutHoldingLock() throws {
+        try withScratch("fifo-state") { root in
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            let fifo = statePath(root)
+            try assert(mkfifo(fifo.path, 0o600) == 0, "create synthetic state FIFO")
+            try runProbe("reject-unsafe-state", root: root, expectedStatus: 0)
+            var info = stat()
+            try assert(lstat(fifo.path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFIFO, "preserve the FIFO")
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(100)) { _ in }
+        }
+    }
+
+    @Test("concurrent callers can initialize the same journal directory")
+    func concurrentFirstUse() async throws {
+        let root = try scratch.directory().appendingPathComponent("first-use-\(UUID().uuidString)")
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(3_000)) {
+                        _ = try $0.loadSnapshot()
+                    }
+                }
+            }
+            try await group.waitForAll()
         }
     }
 
@@ -418,6 +474,84 @@ struct AppleAutomationJournalTests {
                 let bytesAfter = try Data(contentsOf: statePath(root))
                 try assert(bytesAfter == bytesBefore, "malformed state bytes preserved after refused access")
             }
+        }
+    }
+
+    @Test func expiredAdmissionCannotCreateJournalOrEnterBody() throws {
+        try withScratch("expired") { root in
+            do {
+                try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(0)) { _ in
+                    throw TestFailure("admitted an expired caller")
+                }
+                throw TestFailure("expected timeout")
+            } catch AppleAutomationJournal.Error.lockTimedOut {}
+            #expect(!FileManager.default.fileExists(atPath: root.path))
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func replacedJournalIdentityCannotClearPending(moveRoot: Bool) throws {
+        try withScratch("lease-identity") { root in
+            let lock = root.appendingPathComponent(AppleAutomationJournal.lockFileName)
+            let target = moveRoot ? root : lock
+            let saved = target.appendingPathExtension("retained")
+            let operationID = try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(2_000)) { lease in
+                let id = try lease.begin(request())
+                try lease.markUncertainAfterHandoff(operationID: id)
+                try FileManager.default.moveItem(at: target, to: saved)
+                defer { try? FileManager.default.moveItem(at: saved, to: target) }
+                do {
+                    try lease.recover(operationID: id, acknowledgement: .init(operationID: id, lateEffectAcknowledged: true))
+                    throw TestFailure("stale lease cleared pending")
+                } catch AppleAutomationJournal.Error.unsafeStateDirectory where moveRoot {}
+                  catch AppleAutomationJournal.Error.unsafeStateFile where !moveRoot {}
+                do {
+                    _ = try lease.loadSnapshot()
+                    throw TestFailure("lease remained usable after observed identity loss")
+                } catch AppleAutomationJournal.Error.leaseExpired {}
+                return id
+            }
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(2_000)) { fresh in
+                let snapshot = try fresh.loadSnapshot()
+                #expect(snapshot.pending?.operationID == operationID)
+                #expect(snapshot.pending?.phase == .uncertainAfterHandoff)
+                #expect(snapshot.receipts.isEmpty)
+            }
+        }
+    }
+
+    @Test("a waiting caller revalidates its lock before entering the journal")
+    func waiterRevalidatesLockAfterAcquisition() throws {
+        try withScratch("waiter-identity") { root in
+            let deadline = AppleAutomationJournal.MonotonicDeadline.millisecondsFromNow(5_000)
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: deadline) { _ in }
+            let lock = lockPath(root)
+            let held = open(lock.path, O_RDWR | O_CLOEXEC)
+            try #require(held >= 0)
+            defer { close(held) }
+            try #require(flock(held, LOCK_EX | LOCK_NB) == 0)
+
+            var checks = 0
+            var moved = false
+            var entered = false
+            let result = Result {
+                try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: deadline, isCancelled: {
+                    checks += 1
+                    // Admission checks once before opening and again before each try-lock.
+                    // On the first retry, the waiter already holds the original descriptor.
+                    if checks == 3 {
+                        moved = rename(lock.path, root.appendingPathComponent("retained.lock").path) == 0
+                        return flock(held, LOCK_UN) != 0
+                    }
+                    return false
+                }) { _ in entered = true }
+            }
+            #expect(moved)
+            #expect(!entered)
+            do {
+                try result.get()
+                Issue.record("Waiter admitted after its lock disappeared")
+            } catch AppleAutomationJournal.Error.unsafeStateFile {}
         }
     }
 

@@ -736,7 +736,7 @@ struct MessagesAutomationRecover: ParsableCommand {
     func run() throws { try run(dependencies: .live) }
     func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
-            guard let id = UUID(uuidString: opID) else { throw AppleError.validation("op-id must be a UUID") }
+            guard let id = AppleAutomationJournal.parseUUID(opID) else { throw AppleError.validation("op-id must be a UUID") }
             let willExecute = try global.willExecute(defaultDryRun: false)
             let data = try recoverReaction(root: dependencies.messagesAutomationStateRoot(),
                                            operationID: id,
