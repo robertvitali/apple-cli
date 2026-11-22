@@ -37,7 +37,7 @@ apple messages automation status
 
 ## Notes
 
-A pending record gates new Messages UI writes until the original operation reaches observed state or is explicitly recovered. The status output includes `pending` as null or `{operation_id, operation_type, phase}` and `receipts` as `{operation_id, disposition}` records. It does not expose message bodies, recipient addresses or other target values. Reads use the same locked private state root as reaction writes.
+A pending record gates new Messages UI writes until the original operation reaches observed state or is explicitly recovered. Use `--text` to see the pending operation ID, type and phase. Only the `uncertainAfterHandoff` phase is eligible for `messages automation recover`. The JSON output includes `pending` as null or `{operation_id, operation_type, phase}` and `receipts` as `{operation_id, disposition}` records. It does not expose message bodies, recipient addresses or other target values. Reads use the same locked private state root as reaction writes.
 
 ## Output
 

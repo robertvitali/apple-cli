@@ -719,7 +719,10 @@ struct MessagesAutomationStatus: ParsableCommand {
     func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
             let data = try readReactionStatus(root: dependencies.messagesAutomationStateRoot())
-            try emit(global, data) { data.pending == nil ? "No pending Messages automation operation." : "Pending Messages automation operation." }
+            try emit(global, data) {
+                guard let pending = data.pending else { return "No pending Messages automation operation." }
+                return "Pending Messages automation operation \(pending.operation_id.uuidString) (\(pending.operation_type), \(pending.phase))."
+            }
         }
     }
 }

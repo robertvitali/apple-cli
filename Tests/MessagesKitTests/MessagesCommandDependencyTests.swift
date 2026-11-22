@@ -3754,6 +3754,28 @@ struct MessagesCommandDependencyTests {
         #expect((error["message"] as? String)?.contains("pending-operation-exists") == true)
     }
 
+    @Test(arguments: [false, true])
+    func automationTextStatusNamesPendingOperationAndPhase(handedOff: Bool) throws {
+        let fx = try ChatFixture()
+        let deps = reactionDependencies(fx)
+        let stateRoot = fx.homePath + "/messages-automation"
+        let id = UUID()
+        let textStatus = try MessagesAutomationStatus.parse(["--text"])
+        let empty = try captureStdout { try textStatus.run(dependencies: deps) }
+        #expect(empty == "No pending Messages automation operation.\n")
+
+        if handedOff {
+            try seedUncertainPendingReaction(root: stateRoot, operationID: id)
+        } else {
+            try seedPreparedPendingReaction(root: stateRoot, operationID: id)
+        }
+        let before = try readReactionJournalSnapshot(root: stateRoot)
+        let text = try captureStdout { try textStatus.run(dependencies: deps) }
+        let phase = handedOff ? "uncertainAfterHandoff" : "preparedBeforeHandoff"
+        #expect(text == "Pending Messages automation operation \(id.uuidString) (reactionSet, \(phase)).\n")
+        #expect(try readReactionJournalSnapshot(root: stateRoot) == before)
+    }
+
     @Test func automationRecoverDryRunFlagPreservesPendingJournal() throws {
         let fx = try ChatFixture()
         let stateRoot = fx.homePath + "/messages-automation"

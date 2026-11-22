@@ -673,6 +673,8 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- `apple messages automation status --text` includes the pending operation ID, type and handoff phase.
+
 - Exact message reads use the selected conversation for group names and the
   message row for attachment membership.
 - Conversation activity uses exact chat membership. Conversation and history pages
