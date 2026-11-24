@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- `apple messages automation activity-status` reads pending typing operations alongside existing Messages automation operations.
+  Upgrade readers before enabling a typing writer. Downgrade only after
+  `activity-status` shows no pending typing operation.
+
 - `apple messages watch` streams change metadata as NDJSON and resumes from a saved cursor.
   Records omit message bodies and include exact conversation and message identifiers.
   Event streams can be listed with retention details and retired by

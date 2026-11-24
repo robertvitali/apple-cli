@@ -213,13 +213,30 @@ private struct ReactionRecoverData: Encodable {
     let acknowledgement: String
 }
 
-private func readReactionStatus(root: String) throws -> ReactionStatusData {
+private enum AutomationStatusView: String {
+    case legacy = "messages-automation-status"
+    case activity = "messages-automation-activity-status"
+
+    func validate(_ type: AppleAutomationJournal.PendingOperation.OperationType) throws {
+        switch type {
+        case .reactionSet, .replySend, .editMessage, .undoSend, .readState,
+             .muteState, .attachmentRetrieve, .conversationCreate:
+            break
+        case .typing:
+            // Keep the original command's response for a record outside its schema.
+            if self == .legacy { throw AppleAutomationJournal.Error.malformedState }
+        }
+    }
+}
+
+private func readAutomationStatus(root: String, view: AutomationStatusView) throws -> ReactionStatusData {
     let snapshot = try AppleAutomationJournal.withLockedJournal(
         root: root,
         deadline: .millisecondsFromNow(1_000)
     ) { try $0.loadSnapshot() }
+    if let pending = snapshot.pending { try view.validate(pending.operationType) }
     return ReactionStatusData(
-        action: "messages-automation-status",
+        action: view.rawValue,
         pending: snapshot.pending.map {
             ReactionStatusData.Pending(operation_id: $0.operationID,
                                        operation_type: $0.operationType.rawValue,
@@ -711,19 +728,34 @@ struct ReactionRemove: ParsableCommand, ReactionWriteOptions {
     }
 }
 
+private func emitAutomationStatus(view: AutomationStatusView, global: GlobalOptions,
+                                  dependencies: MessagesCommandDependencies) throws {
+    try runGuarded(tool: tool) {
+        let data = try readAutomationStatus(root: dependencies.messagesAutomationStateRoot(), view: view)
+        try emit(global, data) {
+            guard let pending = data.pending else { return "No pending Messages automation operation." }
+            return "Pending Messages automation operation \(pending.operation_id.uuidString) (\(pending.operation_type), \(pending.phase))."
+        }
+    }
+}
+
 struct MessagesAutomationStatus: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "status",
                                                     abstract: "Read pending Messages automation state.")
     @OptionGroup var global: GlobalOptions
     func run() throws { try run(dependencies: .live) }
     func run(dependencies: MessagesCommandDependencies) throws {
-        try runGuarded(tool: tool) {
-            let data = try readReactionStatus(root: dependencies.messagesAutomationStateRoot())
-            try emit(global, data) {
-                guard let pending = data.pending else { return "No pending Messages automation operation." }
-                return "Pending Messages automation operation \(pending.operation_id.uuidString) (\(pending.operation_type), \(pending.phase))."
-            }
-        }
+        try emitAutomationStatus(view: .legacy, global: global, dependencies: dependencies)
+    }
+}
+
+struct MessagesAutomationActivityStatus: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "activity-status",
+                                                    abstract: "Read pending Messages automation state, including typing activity.")
+    @OptionGroup var global: GlobalOptions
+    func run() throws { try run(dependencies: .live) }
+    func run(dependencies: MessagesCommandDependencies) throws {
+        try emitAutomationStatus(view: .activity, global: global, dependencies: dependencies)
     }
 }
 
@@ -731,7 +763,7 @@ struct MessagesAutomationRecover: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "recover",
                                                     abstract: "Explicitly recover a pending Messages automation operation.")
     @OptionGroup var global: GlobalOptions
-    @Option(name: .long, help: "Pending operation id from `messages automation status`.")
+    @Option(name: .long, help: "Pending operation ID from `messages automation activity-status`.")
     var opID: String
     @Flag(name: .long, help: "Acknowledge possible late effects before clearing pending state.")
     var acknowledgePossibleLateEffects = false
@@ -758,6 +790,6 @@ struct MessagesAutomation: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "automation",
         abstract: "Read or recover shared Messages automation state.",
-        subcommands: [MessagesAutomationStatus.self, MessagesAutomationRecover.self]
+        subcommands: [MessagesAutomationStatus.self, MessagesAutomationActivityStatus.self, MessagesAutomationRecover.self]
     )
 }

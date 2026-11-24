@@ -14,6 +14,7 @@ Reads or explicitly recovers the shared Messages UI automation journal used by e
 
 ## Subcommands
 
+- [`activity-status`](./activity-status.md) — Read pending Messages automation state, including typing activity.
 - [`recover`](./recover.md) — Explicitly recover a pending Messages automation operation.
 - [`status`](./status.md) — Read pending Messages automation state.
 

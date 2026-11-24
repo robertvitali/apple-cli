@@ -112,7 +112,7 @@
     "notes": "Reaction writes record pending state before handing work to the UI worker. A timeout, cancellation, failed verification or crash after possible handoff leaves that state unresolved and blocks later Messages UI writes. Status is read-only. Recovery is explicit and requires acknowledgement of possible late effects; it is not a proof that Messages cancelled or quiesced the original request."
   },
   "apple messages automation status": {
-    "description": "Reads the shared Messages automation journal state without driving Messages or clearing anything. It reports the pending operation, if any, plus bounded receipts for resolved or recovered operations.",
+    "description": "Reads the shared Messages automation journal state without driving Messages or clearing anything. It reports the pending operation, if any, plus bounded receipts for resolved or recovered operations. Use messages automation activity-status for typing records. The original status command reports malformed-state for a pending operation type outside its schema.",
     "examples": [
       {
         "title": "Check for a pending Messages automation operation",
@@ -120,6 +120,16 @@
       }
     ],
     "notes": "A pending record gates new Messages UI writes until the original operation reaches observed state or is explicitly recovered. Use `--text` to see the pending operation ID, type and phase. Only the `uncertainAfterHandoff` phase is eligible for `messages automation recover`. The JSON output includes `pending` as null or `{operation_id, operation_type, phase}` and `receipts` as `{operation_id, disposition}` records. It does not expose message bodies, recipient addresses or other target values. Reads use the same locked private state root as reaction writes."
+  },
+  "apple messages automation activity-status": {
+    "description": "Read the pending Messages automation operation and its recovery receipts, including pending typing operations.",
+    "examples": [
+      {
+        "title": "Check the journal for a pending typing operation",
+        "command": "apple messages automation activity-status"
+      }
+    ],
+    "notes": "Upgrade status readers before enabling a typing writer. Older builds from main refuse a pending typing record. Before downgrading, use this command to verify that no typing operation is pending. The action is messages-automation-activity-status. A pending operation has an operation_id, operation_type and phase. A null pending value means the journal has no unresolved operation. The phase describes the recorded handoff. A typing record does not establish that another device saw a typing indicator. This command acquires the journal lock and can time out while another process holds it."
   },
   "apple messages automation recover": {
     "description": "Explicitly clears a pending Messages automation operation after the operator acknowledges possible late effects. It is for uncertain post-handoff states such as timeout, cancellation, failed verification or crash after a request may have reached Messages.",
@@ -133,7 +143,7 @@
         "command": "apple messages automation recover --op-id 00000000-0000-0000-0000-000000000000 --acknowledge-possible-late-effects"
       }
     ],
-    "notes": "Recovery requires `--acknowledge-possible-late-effects`; without it the command refuses. Dry run verifies that the named operation exists and is in an uncertain-after-handoff phase but does not clear it. Execution records a recovered receipt and removes the pending gate. Recovery does not prove cancellation, quiescence, sync completion or correctness of the original UI action; it only acknowledges the risk so later writes can proceed. Use `messages automation status` first and recover only the exact operation id it reports."
+    "notes": "Recovery requires `--acknowledge-possible-late-effects`; without it the command refuses. Dry run verifies that the named operation exists and is in an uncertain-after-handoff phase but does not clear it. Execution records a recovered receipt and removes the pending gate. Recovery does not prove cancellation, quiescence, sync completion or correctness of the original UI action; it only acknowledges the risk so later writes can proceed. Read the pending operation with `messages automation activity-status` and use the exact operation ID it reports."
   },
   "apple messages reaction": {
     "description": "Groups exact Messages reaction inspection and experimental standard and custom-emoji writes. Reads are database-only; writes execute by default unless `--dry-run` or `APPLE_DRY_RUN=1` is active and always report `experimental: true`.",

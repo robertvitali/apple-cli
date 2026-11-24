@@ -17,7 +17,7 @@ Explicitly clears a pending Messages automation operation after the operator ack
 - `--acknowledge-possible-late-effects`
   <br>Acknowledge possible late effects before clearing pending state.
 - `--op-id` `<op-id>`
-  <br>Pending operation id from `messages automation status`.
+  <br>Pending operation ID from `messages automation activity-status`.
 
 ## Inherited options
 
@@ -50,7 +50,7 @@ apple messages automation recover --op-id 00000000-0000-0000-0000-000000000000 -
 
 ## Notes
 
-Recovery requires `--acknowledge-possible-late-effects`; without it the command refuses. Dry run verifies that the named operation exists and is in an uncertain-after-handoff phase but does not clear it. Execution records a recovered receipt and removes the pending gate. Recovery does not prove cancellation, quiescence, sync completion or correctness of the original UI action; it only acknowledges the risk so later writes can proceed. Use `messages automation status` first and recover only the exact operation id it reports.
+Recovery requires `--acknowledge-possible-late-effects`; without it the command refuses. Dry run verifies that the named operation exists and is in an uncertain-after-handoff phase but does not clear it. Execution records a recovered receipt and removes the pending gate. Recovery does not prove cancellation, quiescence, sync completion or correctness of the original UI action; it only acknowledges the risk so later writes can proceed. Read the pending operation with `messages automation activity-status` and use the exact operation ID it reports.
 
 ## Output
 

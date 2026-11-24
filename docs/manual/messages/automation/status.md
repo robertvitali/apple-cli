@@ -10,7 +10,7 @@ apple messages automation status
 
 ## Description
 
-Reads the shared Messages automation journal state without driving Messages or clearing anything. It reports the pending operation, if any, plus bounded receipts for resolved or recovered operations.
+Reads the shared Messages automation journal state without driving Messages or clearing anything. It reports the pending operation, if any, plus bounded receipts for resolved or recovered operations. Use messages automation activity-status for typing records. The original status command reports malformed-state for a pending operation type outside its schema.
 
 ## Inherited options
 

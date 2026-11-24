@@ -4060,6 +4060,34 @@ struct MessagesCommandDependencyTests {
     }
 
     @Test(arguments: [false, true])
+    func activityStatusReadsTypingWithoutExpandingLegacyOutput(handedOff: Bool) throws {
+        let fixture = try ChatFixture()
+        let dependencies = reactionDependencies(fixture)
+        let root = fixture.homePath + "/messages-automation"
+        let operationID = UUID()
+        try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(1_000)) { lease in
+            try lease.beginForTesting(operationID, request: pendingReactionRequest(type: .typing))
+            if handedOff { try lease.markUncertainAfterHandoff(operationID: operationID) }
+        }
+        let before = try readReactionJournalSnapshot(root: root)
+        let legacy = try captureCommand { try MessagesAutomationStatus.parse([]).run(dependencies: dependencies) }
+        #expect(legacy.exitCode != nil)
+        #expect(legacy.stdout.contains("malformed-state"))
+        let parsed = try MessagesCommand.parseAsRoot(["automation", "activity-status"])
+        let command = try #require(parsed as? MessagesAutomationActivityStatus)
+        let result = try captureCommand { try command.run(dependencies: dependencies) }
+        #expect(result.exitCode == nil)
+        let envelope = try #require(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+        let data = try #require(envelope["data"] as? [String: Any])
+        #expect(envelope["schema_version"] as? Int == 1)
+        #expect(data["action"] as? String == "messages-automation-activity-status")
+        let pending = try #require(data["pending"] as? [String: String])
+        #expect(pending == ["operation_id": operationID.uuidString, "operation_type": "typing",
+                            "phase": handedOff ? "uncertainAfterHandoff" : "preparedBeforeHandoff"])
+        #expect(try readReactionJournalSnapshot(root: root) == before)
+    }
+
+    @Test(arguments: [false, true])
     func automationTextStatusNamesPendingOperationAndPhase(handedOff: Bool) throws {
         let fx = try ChatFixture()
         let deps = reactionDependencies(fx)
@@ -5256,9 +5284,9 @@ private func readReactionJournalSnapshot(root: String) throws -> AppleAutomation
     }
 }
 
-private func pendingReactionRequest() throws -> AppleAutomationJournal.OperationRequest {
+private func pendingReactionRequest(type: AppleAutomationJournal.PendingOperation.OperationType = .reactionSet) throws -> AppleAutomationJournal.OperationRequest {
     try AppleAutomationJournal.OperationRequest(
-        operationType: .reactionSet,
+        operationType: type,
         conversationDigest: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "chat:test"),
         messageDigest: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "message:test"),
         partDigest: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "part:2"),

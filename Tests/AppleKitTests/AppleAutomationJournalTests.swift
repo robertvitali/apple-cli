@@ -119,6 +119,39 @@ struct AppleAutomationJournalTests {
         }
     }
 
+    @Test("version-one typing records retain the normal pending gate",
+          arguments: ["preparedBeforeHandoff", "uncertainAfterHandoff"])
+    func storedTypingOperation(phase: String) throws {
+        try withScratch("typing-reader") { root in
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            let id = UUID()
+            let hash = try digest("synthetic typing target").value
+            let record = """
+                {"version":1,"pending":{"operationID":"\(id.uuidString)","operationType":"typing",
+                "conversationDigest":"\(hash)","messageDigest":null,"partDigest":null,
+                "minimumEvidence":{"targetHash":"\(hash)","targetLength":23},
+                "phase":"\(phase)","createdMonotonicNanos":1},"receipts":[]}
+                """
+            let path = statePath(root)
+            try record.write(to: path, atomically: false, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
+                let pending = try #require(try lease.loadSnapshot().pending)
+                #expect(pending.operationID == id)
+                #expect(pending.operationType.rawValue == "typing")
+                #expect(pending.phase.rawValue == phase)
+                do {
+                    _ = try lease.begin(request("next"))
+                    throw TestFailure("pending typing operation should block a new write")
+                } catch AppleAutomationJournal.Error.pendingOperationExists(let existing) {
+                    #expect(existing == id.uuidString)
+                }
+                #expect(try Data(contentsOf: path) == Data(record.utf8))
+            }
+        }
+    }
+
     @Test("pending arrays are rejected on decode")
         func testPendingArraysAreRejectedOnDecode() throws {
         try withScratch("pending-arrays") { root in
