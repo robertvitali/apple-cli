@@ -141,10 +141,14 @@ package enum WorkerResponseCategory: String, Codable, Equatable, Sendable { case
 package struct WorkerOperationResult: Equatable, Sendable {
     package let category: WorkerResponseCategory
     package let detail: String?
+    package let conversationResultDigest: AppleAutomationJournal.TargetDigest?
 
-    package init(_ category: WorkerResponseCategory, detail: String? = nil) {
+    package init(_ category: WorkerResponseCategory, detail: String? = nil,
+                 conversationResultDigest: AppleAutomationJournal.TargetDigest? = nil) {
         self.category = category
         self.detail = Self.safeDetail(detail)
+        self.conversationResultDigest = category == .ack && detail == "conversation-create-persisted-verified"
+            ? conversationResultDigest : nil
     }
 
     package static let ack = WorkerOperationResult(.ack)
@@ -390,6 +394,7 @@ package struct WorkerResponse: Codable, Equatable, Sendable {
     package let nonce: UUID
     package let category: WorkerResponseCategory
     package let detail: String?
+    package let conversationResultDigest: AppleAutomationJournal.TargetDigest?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -397,14 +402,18 @@ package struct WorkerResponse: Codable, Equatable, Sendable {
         case nonce
         case category
         case detail
+        case conversationResultDigest
     }
 
-    package init(schemaVersion: Int, operationID: UUID, nonce: UUID, category: WorkerResponseCategory, detail: String? = nil) {
+    package init(schemaVersion: Int, operationID: UUID, nonce: UUID, category: WorkerResponseCategory, detail: String? = nil,
+                 conversationResultDigest: AppleAutomationJournal.TargetDigest? = nil) {
         self.schemaVersion = schemaVersion
         self.operationID = operationID
         self.nonce = nonce
         self.category = category
-        self.detail = WorkerOperationResult(category, detail: detail).detail
+        let result = WorkerOperationResult(category, detail: detail, conversationResultDigest: conversationResultDigest)
+        self.detail = result.detail
+        self.conversationResultDigest = result.conversationResultDigest
     }
 
     package init(from decoder: any Decoder) throws {
@@ -413,7 +422,9 @@ package struct WorkerResponse: Codable, Equatable, Sendable {
                       operationID: container.workerUUID(forKey: .operationID),
                       nonce: container.workerUUID(forKey: .nonce),
                       category: container.decode(WorkerResponseCategory.self, forKey: .category),
-                      detail: container.decodeIfPresent(String.self, forKey: .detail))
+                      detail: container.decodeIfPresent(String.self, forKey: .detail),
+                      conversationResultDigest: (try? container.decode(String.self, forKey: .conversationResultDigest))
+                          .flatMap { try? AppleAutomationJournal.parseDigest($0) })
     }
 
     package func encode(to encoder: any Encoder) throws {
@@ -423,6 +434,7 @@ package struct WorkerResponse: Codable, Equatable, Sendable {
         try container.encode(nonce, forKey: .nonce)
         try container.encode(category, forKey: .category)
         try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encodeIfPresent(conversationResultDigest?.value, forKey: .conversationResultDigest)
     }
 
     package var failureReason: String { detail ?? category.rawValue }
@@ -618,7 +630,8 @@ package enum InternalWorkerMain {
             defer { watchdog.cancel() }
             let result = try operation.run(request, deadline: request.deadline)
             guard validateParent(request.parent), validateWorkerExecutable(request.workerExecutable, sameExecutableAs: request.parent) else { throw WorkerProtocolError.parentIdentityMismatch }
-            let response = WorkerResponse(schemaVersion: 1, operationID: request.operationID, nonce: request.nonce, category: result.category, detail: result.detail)
+            let response = WorkerResponse(schemaVersion: 1, operationID: request.operationID, nonce: request.nonce, category: result.category, detail: result.detail,
+                                          conversationResultDigest: result.conversationResultDigest)
             let responseData = try JSONEncoder().encode(response)
             try WorkerFrameIO.writeFrame(responseData, to: responseFD, cap: WorkerFrameIO.responseCap,
                                          io: io, deadline: request.deadline)

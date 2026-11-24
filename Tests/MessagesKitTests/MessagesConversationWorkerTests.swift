@@ -85,6 +85,22 @@ struct MessagesConversationBindingTests {
         for raw in ["+12125550100", fx.payload.initialText, "iMessage;-;"] { #expect(!text.contains(raw)) }
     }
 
+    @Test func malformedOptionalDigestPreservesOtherWorkerResponses() throws {
+        for detail in ["edit-persisted-verified", "conversation-create-persisted-verified"] {
+            let original = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(),
+                                          category: .ack, detail: detail)
+            let data = try JSONEncoder().encode(original)
+            var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            for invalid: Any in ["private-text", String(repeating: "a", count: 64), 42, NSNull()] as [Any] {
+                object["conversationResultDigest"] = invalid
+                let bytes = try JSONSerialization.data(withJSONObject: object)
+                let decoded = try JSONDecoder().decode(WorkerResponse.self, from: bytes)
+                #expect(decoded == original)
+                #expect(decoded.conversationResultDigest == nil)
+            }
+        }
+    }
+
     @Test func wireAllowsOnlyClosedCreationResultStrings() {
         for detail in ["conversation-create-preflight-refused", "conversation-create-unverified", "conversation-create-persisted-verified"] {
             #expect(WorkerOperationResult(.failed, detail: detail).detail == detail)
@@ -109,7 +125,40 @@ struct MessagesConversationWorkerTests {
         let result = sequence.run(deadline: .millisecondsFromNow(5000))
         #expect(result.category == .ack)
         #expect(result.detail == "conversation-create-persisted-verified")
+        let observed = try #require(try fx.observe(fx.baseline, .millisecondsFromNow(5000)))
+        #expect(result.conversationResultDigest == (try observed.resultDigest()))
         #expect(sends == 1 && reads == 1 && observations == 1)
+    }
+
+    @Test(arguments: [1, 2, 3])
+    func groupSendRequiresEveryRequestedRecipientInPersistedChat(resolvedCount: Int) throws {
+        let requested = ["+12125550100", "+12125550101", "+12125550102"]
+        let fx = try CreationWorkerFixture(recipients: requested)
+        try fx.db.exec("UPDATE handle SET service='iMessage' WHERE ROWID=2")
+        var sends = 0, observations = 0
+        let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
+            prepare: { _, _ in fx.composer {
+                sends += 1
+                // One or two resolved handles can survive a three-recipient composer handoff.
+                try fx.db.exec("""
+                    INSERT INTO chat(ROWID,guid,style,service_name)
+                    VALUES(70,'synthetic-routed-chat',\(resolvedCount == 1 ? 45 : 43),'iMessage');
+                    INSERT INTO chat_handle_join SELECT 70,ROWID FROM handle WHERE ROWID BETWEEN 1 AND \(resolvedCount);
+                    """)
+                try fx.send(chat: 70)
+            } }, verify: { before, deadline in
+                observations += 1
+                return try fx.observe(before, deadline)
+            }, pause: { _ in throw WorkerProtocolError.cancelled })
+        let result = sequence.run(deadline: .millisecondsFromNow(5000))
+        #expect(sends == 1 && observations == 1)
+        if resolvedCount == requested.count {
+            #expect(result.category == .ack)
+            #expect(result.conversationResultDigest != nil)
+        } else {
+            #expect(result.detail == "conversation-create-unverified")
+            #expect(result.conversationResultDigest == nil)
+        }
     }
 
     @Test func staleInitialBaselinePreventsPreparation() throws {

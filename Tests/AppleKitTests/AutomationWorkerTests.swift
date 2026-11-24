@@ -693,6 +693,14 @@ struct AutomationWorkerTests {
         #expect(outcome.contains(",verified-ok)|pending=none|receipts=observedState"))
     }
 
+    @Test("creation result digest survives the worker pipe before the observed receipt")
+    func creationResultDigestReachesParent() throws {
+        let root = try scratch.directory().appendingPathComponent("creation-result", isDirectory: true)
+        let outcome = try launchObservedThroughProbe(root: root, command: "probe.creation-result", seed: "creation")
+        #expect(outcome.hasPrefix("observedState("))
+        #expect(outcome.contains(",verified-creation-identity)|pending=none|receipts=observedState"))
+    }
+
     @Test("observed no-op is blocked by pending and writes no receipt")
     func observedNoOpIsBlockedByPendingAndWritesNoReceipt() throws {
         let pendingRoot = try scratch.directory().appendingPathComponent("observed-noop-pending-\(UUID().uuidString)", isDirectory: true)

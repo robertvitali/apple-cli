@@ -36,6 +36,9 @@ struct ProbeOperation: WorkerOperation {
             return .ack
         case "probe.crash":
             Darwin.abort()
+        case "probe.creation-result":
+            return try .init(.ack, detail: "conversation-create-persisted-verified",
+                             conversationResultDigest: digest("synthetic-observed-message"))
         case "probe.refuse":
             return .refused("probe-refused")
         case "probe.refuse-unsafe-detail":
@@ -194,6 +197,9 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
                 let confirmed = try WorkerLauncher().confirmDownloadedAttachment(payload: Data(value.utf8),
                     operationID: response.operationID, context: context)
                 return confirmed ? "confirmed-download" : nil
+            case "probe.creation-result":
+                guard response.conversationResultDigest == (try digest("synthetic-observed-message")) else { return nil }
+                return "verified-creation-identity"
             case "probe.verify-lock":
                 guard try competingProcessCannotAcquire(root: root) else { throw WorkerProtocolError.invalidDescriptor }
                 return "verified-lock"

@@ -68,13 +68,15 @@ final class MessagesConversationExecution {
             }, verify: { candidate, response, context in
                 self.verifiedEvidence = nil
                 guard self.matches(candidate), let resolved = self.resolution,
-                      response.category == .ack, response.detail == "conversation-create-persisted-verified" else { return nil }
+                      response.category == .ack, response.detail == "conversation-create-persisted-verified",
+                      let workerDigest = response.conversationResultDigest else { return nil }
                 do {
                     try self.checkpoint(context)
                     guard let evidence = try MessagesConversationVerification.read(databasePath: self.databasePath,
                         baseline: resolved.baseline, initialText: resolved.request.initialText,
                         deadline: self.boundedDeadline(context),
-                        isCancelled: { self.isCancelled() || context.isCancelled }) else { return nil }
+                        isCancelled: { self.isCancelled() || context.isCancelled }),
+                          try evidence.resultDigest() == workerDigest else { return nil }
                     try self.checkpoint(context)
                     self.verifiedEvidence = evidence
                     return "Observed one exact sent iMessage with verified conversation membership; creation attribution remains unproven."

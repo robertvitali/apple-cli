@@ -102,7 +102,8 @@ struct MessagesConversationCommandTests {
                 """, nil, nil, nil) == SQLITE_OK)
             let id = UUID()
             let response = WorkerResponse(schemaVersion: 1, operationID: id, nonce: UUID(), category: .ack,
-                                          detail: "conversation-create-persisted-verified")
+                                          detail: "conversation-create-persisted-verified",
+                                          conversationResultDigest: try fixtureCreationResultDigest())
             let verification = try #require(try action.verify(resolved, response, context))
             return .observedState(operationID: id, verification: verification)
         })

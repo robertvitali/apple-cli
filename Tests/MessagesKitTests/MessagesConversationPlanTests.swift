@@ -130,6 +130,34 @@ struct MessagesConversationPlanTests {
         guard case .ready = result else { Issue.record("Expected allowed direct plan"); return }
     }
 
+    @Test(arguments: [false, true])
+    func invalidSandboxLabelsCannotReadContacts(_ execute: Bool) {
+        let cases: [(String, String, MessagesConversationPlan.Failure)] = [
+            ("t\u{e9}st", "te\u{301}st initial", .sandboxLabelRequired),
+            ("te\u{301}st", "t\u{e9}st initial", .sandboxLabelRequired),
+            ("a\nb", "a\nb initial", .invalidPolicy),
+            ("a\u{7f}b", "a\u{7f}b initial", .invalidPolicy),
+        ]
+        for (prefix, message, error) in cases {
+            #expect(throws: error) {
+                try MessagesConversationPlan.build(inputs: ["Alice Example"], message: message, service: "imessage",
+                    gate: gate(execute: execute, sandbox: true, prefix: prefix, allowed: ["+12125550100"]),
+                    deadline: .millisecondsFromNow(5000),
+                    loadContacts: { Issue.record("Invalid sandbox label reached contacts"); return [] })
+            }
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func sandboxLabelCanEndInsideAGrapheme(_ execute: Bool) throws {
+        let text = "apple-cli-test\u{301} initial"
+        let result = try MessagesConversationPlan.build(inputs: ["+12125550100"], message: text, service: "imessage",
+            gate: gate(execute: execute, sandbox: true, allowed: ["+12125550100"]), deadline: .millisecondsFromNow(5000),
+            loadContacts: { Issue.record("Exact recipient reached contacts"); return [] })
+        guard case .ready(let plan) = result else { Issue.record("Expected byte-exact label to pass"); return }
+        #expect(plan.initialText.utf8.elementsEqual(text.utf8))
+    }
+
     @Test func emptySandboxAllowlistRefuses() {
         #expect(throws: MessagesConversationPlan.Failure.recipientNotAllowed) {
             try MessagesConversationPlan.build(inputs: ["+12125550100"], message: "apple-cli-test initial", service: "imessage",

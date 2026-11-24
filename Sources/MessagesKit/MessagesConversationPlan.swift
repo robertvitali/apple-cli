@@ -34,6 +34,11 @@ enum MessagesConversationPlan {
     struct UnresolvedRecipient: Sendable { let index: Int; let input: String; let reason: Reason }
     enum Result: Sendable { case ready(Plan), unresolved([UnresolvedRecipient]) }
 
+    static func validSandboxPrefix(_ prefix: String) -> Bool {
+        !prefix.isEmpty && prefix.utf8.prefix(513).count <= 512 &&
+            !prefix.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
+    }
+
     static func build(inputs: [String], message: String, service: String?, gate: MessagesWriteGuard.Gate,
                       deadline: WorkerDeadline, isCancelled: @escaping () -> Bool = { false },
                       loadContacts: () throws -> [MessagesConversationRawContacts.Record]) throws -> Result {
@@ -50,13 +55,15 @@ enum MessagesConversationPlan {
         }
         guard service == "imessage" else { throw Failure.unsupportedService }
         if gate.sandboxActive {
-            guard !gate.sandboxPrefix.isEmpty, gate.sandboxPrefix.utf8.prefix(513).count <= 512,
+            guard validSandboxPrefix(gate.sandboxPrefix),
                   gate.allowedRecipients.count <= 4096,
                   gate.allowedRecipients.allSatisfy({ $0.utf8.prefix(513).count <= 512 }) else {
                 throw Failure.invalidPolicy
             }
             guard inputs.count == 1 else { throw Failure.sandboxGroupUnavailable }
-            guard message.hasPrefix(gate.sandboxPrefix) else { throw Failure.sandboxLabelRequired }
+            guard message.utf8.starts(with: gate.sandboxPrefix.utf8) else {
+                throw Failure.sandboxLabelRequired
+            }
         }
         var capturedContacts: [MessagesConversationRawContacts.Record]?
         func contacts() throws -> [MessagesConversationRawContacts.Record] {

@@ -47,8 +47,7 @@ struct MessagesConversationRequest: Codable, Sendable {
             throw Failure.invalidPayload
         }
         if let sandboxPrefix {
-            guard recipients.count == 1, !sandboxPrefix.isEmpty, sandboxPrefix.utf8.prefix(513).count <= 512,
-                  !sandboxPrefix.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+            guard recipients.count == 1, MessagesConversationPlan.validSandboxPrefix(sandboxPrefix),
                   initialText.utf8.starts(with: sandboxPrefix.utf8) else { throw Failure.invalidPayload }
         }
         self.recipients = recipients

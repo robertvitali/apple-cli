@@ -147,7 +147,7 @@ public enum Send {
 
     // MARK: - Service selection
 
-    /// Which Messages service a 1:1 send is allowed to use.
+    /// Which account the script selects for a one-to-one send.
     ///
     /// `auto` is the behaviour ported from the Messages oracle and stays the default: iMessage
     /// first, with the automatic SMS fallback for phone-shaped recipients. `imessage` and `sms` are
@@ -236,8 +236,8 @@ public enum Send {
     /// What one osascript run reported back.
     public struct Outcome: Equatable, Sendable {
         public let ok: Bool
-        /// The service that actually carried the send (`iMessage` / `SMS`), or nil for a group
-        /// chat, whose service is the chat's own and is not reported by Messages.
+        /// The successful script branch (`iMessage` or `SMS`). Group sends address a chat
+        /// directly and return nil. Messages resolves the final delivery transport.
         public let service: String?
         /// How many attachments were actually delivered. On a failure this is what a retry must
         /// EXCLUDE: a resend is a second message, not an update.

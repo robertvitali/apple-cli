@@ -703,6 +703,9 @@ JSON output are stable per the versioning policy — breaking changes bump
 - Attachment reply verification now rechecks the stored file path after hashing.
   A moved directory, replacement file, or symlink leaves the reply unverified.
 
+- The unregistered conversation creation command records an observed-state
+  receipt only after the worker and parent identify the same message and chat.
+
 - Exact message reads use the selected conversation for group names and the
   message row for attachment membership.
 - Conversation activity uses exact chat membership. Conversation and history pages

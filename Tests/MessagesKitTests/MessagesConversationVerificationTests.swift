@@ -32,6 +32,41 @@ struct MessagesConversationVerificationTests {
             initialText: text ?? self.text, deadline: .millisecondsFromNow(5000))
     }
 
+    @Test func firstMessageMatchesItsCompleteUTF8Text() throws {
+        let fx = try fixture(), before = try baseline(fx)
+        try send(fx)
+        try fx.exec("UPDATE message SET text=CAST(x'EFBBBF'||CAST(text AS BLOB) AS TEXT) WHERE rowid=60")
+        #expect(try read(fx, before) == nil)
+        #expect(try read(fx, before, text: "\u{FEFF}" + text)?.messageRowid == 60)
+        try fx.exec("UPDATE message SET text=CAST(x'FF'||CAST(text AS BLOB) AS TEXT) WHERE rowid=60")
+        #expect(throws: MessagesConversationVerification.Failure.invalidObservation) { try read(fx, before) }
+    }
+
+    @Test func messageServiceMustMatchStoredBytes() throws {
+        let fx = try fixture(), before = try baseline(fx)
+        try send(fx)
+        try fx.exec("UPDATE message SET service=CAST(x'EFBBBF694D657373616765' AS TEXT) WHERE rowid=60")
+        #expect(try read(fx, before) == nil)
+    }
+
+    @Test func chatServiceMustStillMatchStoredBytesAfterBaseline() throws {
+        let fx = try fixture(), before = try baseline(fx)
+        try send(fx)
+        try fx.exec("UPDATE chat SET service_name=CAST(x'EFBBBF694D657373616765' AS TEXT) WHERE rowid=3")
+        #expect(throws: MessagesConversationVerification.Failure.invalidObservation) { try read(fx, before) }
+    }
+
+    @Test func plainAndAttributedBodiesMustAgreeOnTheirFirstBytes() throws {
+        let fx = try fixture(), before = try baseline(fx)
+        try send(fx)
+        let body = NSMutableAttributedString(string: text)
+        body.addAttribute(NSAttributedString.Key("__kIMMessagePartAttributeName"), value: NSNumber(value: 0),
+                          range: NSRange(location: 0, length: body.length))
+        let hex = NSArchiver.archivedData(withRootObject: body).map { String(format: "%02x", $0) }.joined()
+        try fx.exec("UPDATE message SET text=CAST(x'EFBBBF'||CAST(text AS BLOB) AS TEXT),attributedBody=x'\(hex)' WHERE rowid=60")
+        #expect(throws: MessagesConversationVerification.Failure.invalidObservation) { try read(fx, before) }
+    }
+
     @Test func exactExistingDMReturnsObservedIdentity() throws {
         let fx = try fixture(), before = try baseline(fx)
         try send(fx)
@@ -75,6 +110,35 @@ struct MessagesConversationVerificationTests {
         let fx = try fixture(), before = try baseline(fx)
         try send(fx); try send(fx, id: 61)
         #expect(throws: MessagesConversationVerification.Failure.ambiguous) { try read(fx, before) }
+    }
+
+    @Test(arguments: [true, false], ["iMessage", "SMS", "RCS"])
+    func concurrentSameTextOnAnotherRouteCannotSupplyAReceipt(intendedFirst: Bool, service: String) throws {
+        let fx = try fixture(), before = try baseline(fx)
+        let other = intendedFirst ? 61 : 60
+        try send(fx, id: intendedFirst ? 60 : 61)
+        try send(fx, id: other, chat: 1)
+        try fx.exec("UPDATE message SET service='\(service)' WHERE ROWID=\(other)")
+        #expect(throws: MessagesConversationVerification.Failure.ambiguous) { try read(fx, before) }
+
+        try fx.exec("UPDATE message SET text='different synthetic message' WHERE ROWID=\(other)")
+        #expect(try read(fx, before)?.messageRowid == (intendedFirst ? 60 : 61))
+        try fx.exec("UPDATE message SET text='apple-cli-test creation', is_from_me=0 WHERE ROWID=\(other)")
+        #expect(try read(fx, before)?.messageRowid == (intendedFirst ? 60 : 61))
+    }
+
+    @Test(arguments: ["SMS", "RCS"])
+    func competingOutgoingAttemptCanRemainUnsent(service: String) throws {
+        let fx = try fixture(), before = try baseline(fx)
+        try send(fx)
+        try send(fx, id: 61, chat: 1)
+        try fx.exec("UPDATE message SET service='\(service)' WHERE ROWID=61")
+        for state in ["is_sent=0,error=0", "is_sent=0,error=1", "is_sent=NULL,error=0", "is_sent=1,error=NULL"] {
+            try fx.exec("UPDATE message SET \(state), text='apple-cli-test creation' WHERE ROWID=61")
+            #expect(throws: MessagesConversationVerification.Failure.ambiguous) { try read(fx, before) }
+            try fx.exec("UPDATE message SET text='different synthetic message' WHERE ROWID=61")
+            #expect(try read(fx, before)?.messageRowid == 60)
+        }
     }
 
     @Test func noNewMessageAndReusedRowidCannotMatchOldText() throws {

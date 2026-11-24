@@ -41,7 +41,10 @@ struct MessagesConversationWorkerSequence {
                 try checkpoint(deadline)
                 let evidence = try verify(baseline, deadline)
                 try checkpoint(deadline)
-                if evidence != nil { return .init(.ack, detail: "conversation-create-persisted-verified") }
+                if let evidence {
+                    return try .init(.ack, detail: "conversation-create-persisted-verified",
+                                     conversationResultDigest: evidence.resultDigest())
+                }
                 if attempt < 59 { try pause(min(50_000_000, deadline.remainingNanoseconds)) }
             }
         } catch {

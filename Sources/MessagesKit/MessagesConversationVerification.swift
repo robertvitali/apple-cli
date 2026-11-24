@@ -16,6 +16,15 @@ enum MessagesConversationVerification {
         let conversation: MessagesConversationStore.Conversation
         let observation: Observation
         var creationAttribution: String { "unproven" }
+
+        // Both readers independently verify recipients, service and body against the
+        // bound request. Bind their resulting identities across the worker pipe too.
+        func resultDigest() throws -> AppleAutomationJournal.TargetDigest {
+            let fields = ["conversation-create-observation-v1", String(conversation.rowid),
+                          conversation.guid, String(messageRowid), messageGUID, observation.rawValue]
+            let data = try JSONEncoder().encode(fields)
+            return try AppleAutomationJournal.targetDigest(forOpaqueIdentifier: String(decoding: data, as: UTF8.self))
+        }
     }
 
     static func read(databasePath: String, baseline: MessagesConversationBaseline.Snapshot,
@@ -43,7 +52,8 @@ enum MessagesConversationVerification {
                            CASE WHEN typeof(guid)='text' THEN CAST(guid AS BLOB) END AS guid,
                            typeof(text) AS text_type,
                            CASE WHEN typeof(text)='text' THEN CAST(text AS BLOB) END AS text,
-                           attributedBody,is_from_me,is_sent,error,service
+                           attributedBody,is_from_me,is_sent,error,
+                           CASE WHEN typeof(service)='text' THEN CAST(service AS BLOB) END AS service
                     FROM message WHERE _rowid_>CAST(?1 AS INTEGER) ORDER BY _rowid_ LIMIT 513
                     """, [String(baseline.maximumMessageRowid)]) { row in
                         guard rows.count < 512 else { throw Failure.limitExceeded }
@@ -54,8 +64,11 @@ enum MessagesConversationVerification {
                     try checkpoint()
                     guard case .integer(let id)? = row.values["id"], id > baseline.maximumMessageRowid,
                           case .integer(let own)? = row.values["is_from_me"], own == 0 || own == 1,
-                          case .text(let service)? = row.values["service"] else { throw Failure.invalidObservation }
-                    guard own == 1, service == "iMessage" else { continue }
+                          case .blob(let serviceBytes)? = row.values["service"] else { throw Failure.invalidObservation }
+                    guard let service = MessagesConversationStore.exactUTF8(serviceBytes) else {
+                        throw SQLiteReadTransaction.Failure.invalidText
+                    }
+                    guard own == 1, service.utf8.elementsEqual("iMessage".utf8) else { continue }
                     let text = try exactText(row)
                     try checkpoint()
                     guard text.utf8.elementsEqual(initialText.utf8) else { continue }
@@ -85,6 +98,15 @@ enum MessagesConversationVerification {
                     result = Evidence(messageRowid: id, messageGUID: messageGUID,
                                       conversation: conversation, observation: observation)
                 }
+                if let result {
+                    // Native handle resolution can narrow a group or select another service.
+                    // Even a failed or pending attempt could be ours while a concurrent send succeeds.
+                    for row in rows where row.values["id"] != .integer(result.messageRowid)
+                        && row.values["is_from_me"] == .integer(1) {
+                        try checkpoint()
+                        if try exactText(row).utf8.elementsEqual(initialText.utf8) { throw Failure.ambiguous }
+                    }
+                }
                 try checkpoint()
                 return result
             }
@@ -96,7 +118,7 @@ enum MessagesConversationVerification {
         case .text("null"): column = nil
         case .text("text"):
             guard case .blob(let bytes)? = row.values["text"],
-                  let value = String(data: bytes, encoding: .utf8) else { throw Failure.invalidObservation }
+                  let value = MessagesConversationStore.exactUTF8(bytes) else { throw Failure.invalidObservation }
             column = value
         default: throw Failure.invalidObservation
         }
@@ -147,7 +169,7 @@ enum MessagesConversationVerification {
         var chatID: Int64?
         try scope.forEachRow("""
             SELECT chat_id,message_id FROM chat_message_join
-            WHERE CAST(message_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 2
+            WHERE (message_id=CAST(?1 AS INTEGER) OR CAST(message_id AS INTEGER)=CAST(?1 AS INTEGER)) LIMIT 2
             """, [String(messageRowid)]) { row in
                 guard chatID == nil, case .integer(let chat)? = row.values["chat_id"], chat > 0,
                       case .integer(let message)? = row.values["message_id"], message == messageRowid else {
@@ -158,13 +180,14 @@ enum MessagesConversationVerification {
         guard let chatID else { throw Failure.invalidObservation }
         var header: MessagesConversationStore.Header?
         try scope.forEachRow("""
-            SELECT _rowid_ AS id,style,service_name,
+            SELECT _rowid_ AS id,style,
+                   CASE WHEN typeof(service_name)='text' THEN CAST(service_name AS BLOB) END AS service_name,
                    CASE WHEN typeof(guid)='text' THEN CAST(guid AS BLOB) END AS guid
             FROM chat WHERE _rowid_=CAST(?1 AS INTEGER) LIMIT 2
             """, [String(chatID)]) { row in
                 guard header == nil, case .integer(let id)? = row.values["id"], id == chatID,
                       case .integer(let style)? = row.values["style"], [43, 45].contains(style),
-                      case .text("iMessage")? = row.values["service_name"],
+                      case .blob(let service)? = row.values["service_name"], service.elementsEqual("iMessage".utf8),
                       case .blob(let guid)? = row.values["guid"] else { throw Failure.invalidObservation }
                 header = .init(rowid: id, style: style, guidBytes: guid)
             }
@@ -176,7 +199,7 @@ enum MessagesConversationVerification {
     private static func requireNoAttachments(messageRowid: Int64, in scope: SQLiteReadTransaction) throws {
         try scope.forEachRow("""
             SELECT message_id FROM message_attachment_join
-            WHERE CAST(message_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 1
+            WHERE (message_id=CAST(?1 AS INTEGER) OR CAST(message_id AS INTEGER)=CAST(?1 AS INTEGER)) LIMIT 1
             """, [String(messageRowid)]) { _ in throw Failure.invalidObservation }
     }
 }

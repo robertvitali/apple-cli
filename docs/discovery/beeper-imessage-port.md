@@ -444,6 +444,29 @@ support or live reliability.
 12. DM/group creation previews resolved recipients and initial content; upstream
     requires an initial send, so the command documents that side effect. Return
     the verified conversation identity, never a boolean when resolution fails.
+    An iMessage account selection in AppleScript cannot verify creation transport.
+    On macOS 27.2, Messages can look up an existing DM by handle across services,
+    then dispatch using that chat’s account. The scripting send command accepts
+    a participant or a chat. A list of participants requires a separate creation path.
+    In a macOS 27.2 fixture, an `imessage:open` URL with an explicit recipient
+    list passed both addresses to the new composer. The handler did not request
+    the parsed service. With retargeting enabled, it opened the existing chat
+    returned by an alternative-service lookup even with `service=iMessage`.
+    A compose URL alone cannot authorize the initial send.
+    In a macOS 27.2 composer fixture, an account lookup that resolved only part
+    of a group still supplied the remaining handles to conversation lookup.
+    The composer installed that conversation and reached its send-alert check.
+    A pre-existing chat could bypass handle lookup entirely. Verify the selected
+    conversation's complete membership and service at handoff, even when the
+    displayed recipients matched before the press.
+    With unknown-sender filtering enabled and the selected chat filtered, the
+    installed composer calls IMChat before showing its send alert. In a fixture,
+    IMChat requested that the selected chat’s filter be cleared and the chat
+    accepted, including when handle lookup had narrowed the recipient list.
+    Receipt verification occurs too late to prevent these effects.
+    A second fresh outgoing row with the same text makes the receipt ambiguous,
+    including when that row used another service and its send is pending or
+    failed. The successful message in the intended chat could be concurrent.
 13. Focus observation and Notify Anyway are separate explicit operations. No send
     or reply automatically invokes Notify Anyway.
 

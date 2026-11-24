@@ -200,9 +200,9 @@ struct SendResult: Encodable {
     let recipient: String
     let resolved_handle: String
     let display_name: String?
+    /// Account selected by the successful send script branch, absent for group sends.
     let service_used: String?
-    /// What the caller asked for ("auto" | "imessage" | "sms"), alongside `service_used`, which
-    /// is what actually carried it — the two differ whenever `auto` fell back to SMS.
+    /// The caller’s requested account selection mode ("auto" | "imessage" | "sms").
     let service_requested: String
     /// Absent when the send carried no body (a file-only send).
     let message: String?

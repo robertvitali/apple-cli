@@ -440,7 +440,7 @@ struct Send_: ParsableCommand {
     var message: String?
     @Flag(name: [.short, .long], help: "Treat the recipient as a group chat id.") var group = false
     @Option(name: .long,
-            help: "Which service a one-to-one send may use: auto (default — iMessage first, then SMS for a phone number), imessage (iMessage only, no fallback), or sms (SMS only). Accepted but ignored with --group: a chat id already names the chat's own service.")
+            help: "Account selection for one-to-one sends. auto tries iMessage first and can retry through SMS for a phone number. imessage and sms each select one account. Messages determines the delivery transport. Group sends use the specified chat.")
     var service: String = Send.Service.auto.rawValue
     @Option(name: .long,
             help: "Path to a file to send as an attachment. Repeat to send several; each is sent after the message body, in the order given.")

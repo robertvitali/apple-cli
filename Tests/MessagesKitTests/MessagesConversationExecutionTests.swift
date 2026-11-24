@@ -4,6 +4,15 @@ import TestSupport
 @testable import AppleKit
 @testable import MessagesKit
 
+// Identity expected from the independent worker in the existing direct-chat fixture.
+func fixtureCreationResultDigest() throws -> AppleAutomationJournal.TargetDigest {
+    let chat = MessagesConversationStore.Conversation(rowid: 3, guid: "iMessage;-;+12125550100",
+        style: 45, recipients: [try MessagesConversationAddress.parse("+12125550100")])
+    let evidence = MessagesConversationVerification.Evidence(messageRowid: 60, messageGUID: "synthetic-created",
+        conversation: chat, observation: .presentAtBaseline)
+    return try evidence.resultDigest()
+}
+
 @Suite("Conversation creation parent orchestration")
 struct MessagesConversationExecutionTests {
     private let scratch = ScratchDirs("conversation-execution")
@@ -21,9 +30,9 @@ struct MessagesConversationExecutionTests {
             databasePath: fx.path, stateRoot: root, deadline: deadline, isCancelled: cancelled, loadContacts: contacts)
     }
     private func context() -> WorkerObservedContext { .init(deadline: .millisecondsFromNow(5000), isCancelled: { false }) }
-    private func ack() -> WorkerResponse {
+    private func ack() throws -> WorkerResponse {
         WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack,
-                       detail: "conversation-create-persisted-verified")
+                       detail: "conversation-create-persisted-verified", conversationResultDigest: try fixtureCreationResultDigest())
     }
     private func send(_ fx: ChatFixture) throws {
         try fx.exec("""
@@ -87,6 +96,31 @@ struct MessagesConversationExecutionTests {
         #expect(operation.verifiedEvidence?.messageRowid == 60)
         #expect(operation.verifiedEvidence?.conversation.rowid == 3)
         #expect(operation.verifiedEvidence?.creationAttribution == "unproven")
+    }
+
+    @Test(arguments: [
+        "UPDATE message SET guid='synthetic-replacement' WHERE ROWID=60",
+        "UPDATE message SET ROWID=61 WHERE ROWID=60; UPDATE chat_message_join SET message_id=61 WHERE message_id=60",
+    ])
+    func replacementAfterWorkerVerificationCannotPublishEvidence(_ replacement: String) throws {
+        let fx = try fixture(), operation = session(fx), action = operation.action()
+        let resolved = try action.resolve()
+        try send(fx)
+        let response = try ack()
+        #expect(try action.verify(resolved, response, context()) != nil)
+        try fx.exec(replacement)
+        #expect(try action.verify(resolved, response, context()) == nil)
+        #expect(operation.verifiedEvidence == nil)
+    }
+
+    @Test func bareAckCannotPublishAnOtherwiseMatchingMessage() throws {
+        let fx = try fixture(), operation = session(fx), action = operation.action()
+        let resolved = try action.resolve()
+        try send(fx)
+        let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack,
+                                      detail: "conversation-create-persisted-verified")
+        #expect(try action.verify(resolved, response, context()) == nil)
+        #expect(operation.verifiedEvidence == nil)
     }
 
     @Test func mismatchedBindingOrResponseCannotPublishEvidence() throws {

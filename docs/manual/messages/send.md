@@ -10,7 +10,7 @@ apple messages send <recipient> [flags]
 
 ## Description
 
-Sends when invoked; `--dry-run` previews. `--service` picks the route for a one-to-one send: `auto` (the default) tries iMessage and falls back to SMS for a phone-shaped recipient, `imessage` uses iMessage only and fails rather than falling back, and `sms` uses the enabled SMS account only. `--file` attaches a file and may be repeated; the message body goes out first, then each file in the order given, all in one Messages automation run. Either a message or a file is required — a send with neither is a `validation_error`, reported after the recipient has been resolved, so an unknown recipient or a sandbox refusal comes first.
+Sends when invoked. Use `--dry-run` to preview. For one-to-one sends, `--service auto` tries the iMessage account first and can retry through SMS for a phone-shaped recipient. The explicit `imessage` and `sms` modes each select one account. Messages resolves the final transport when it sends. `--file` attaches a file and may be repeated; the message body goes out first, then each file in the order given, all in one Messages automation run. Either a message or a file is required — a send with neither is a `validation_error`, reported after the recipient has been resolved, so an unknown recipient or a sandbox refusal comes first.
 
 ## Options
 
@@ -23,7 +23,7 @@ Sends when invoked; `--dry-run` previews. `--service` picks the route for a one-
 - `-m`, `--message` `<message>`
   <br>Message body. Optional when --file is given; a send needs a body, a file, or both.
 - `--service` `<service>`
-  <br>Which service a one-to-one send may use: auto (default — iMessage first, then SMS for a phone number), imessage (iMessage only, no fallback), or sms (SMS only). Accepted but ignored with --group: a chat id already names the chat's own service.
+  <br>Account selection for one-to-one sends. auto tries iMessage first and can retry through SMS for a phone number. imessage and sms each select one account. Messages determines the delivery transport. Group sends use the specified chat.
 
 ## Inherited options
 
@@ -48,7 +48,7 @@ Preview a send without sending it
 apple messages send +12125550100 --message "Running late" --dry-run
 ```
 
-Send over iMessage only, with no SMS fallback
+Select the iMessage account and disable the CLI’s SMS retry
 
 ```console
 apple messages send jane.doe@example.com --message "Deck attached" --service imessage
@@ -68,7 +68,7 @@ apple messages send +12125550100 --file ~/Documents/one.pdf
 
 ## Notes
 
-`--service` applies to one-to-one sends only. It is accepted with `--group` and has no effect there: a chat id already names the chat's own service, and Messages offers no choice. The flag is still reported back as `service_requested` so a caller can see it was ignored rather than silently honoured. `--service sms` to a recipient with no digits in it is refused up front as a `validation_error` (exit 64), because SMS cannot reach one. The test is literally "does this contain a digit", the same one the `auto` fallback uses, so an address like `jane.doe1@example.com` passes it and fails later inside Messages instead; `auto` and `imessage` reach email addresses normally.
+For a one-to-one send, `service_used` identifies the account branch that returned success. It cannot confirm which transport carried the message. With `--group`, the CLI addresses the chat directly and omits `service_used`. Both modes report the supplied `service_requested`. `--service sms` to a recipient with no digits in it is refused up front as a `validation_error` (exit 64), because SMS cannot reach one. The test is literally "does this contain a digit", the same one the `auto` fallback uses, so an address like `jane.doe1@example.com` passes it and fails later inside Messages instead; `auto` and `imessage` reach email addresses normally.
 
 `--file` works with `--group` too, and each file then goes to the whole chat rather than to one person. That path is pinned at the command layer and its AppleScript is compile-checked, but it has never been run against a live group, so treat the delivery behaviour as designed and unverified. The sandbox (`--test-mode` / `APPLE_TEST_MODE`) refuses group sends outright and still confines one-to-one recipients to `APPLE_TEST_RECIPIENTS`; neither flag changes that.
 

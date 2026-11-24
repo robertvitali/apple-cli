@@ -9,6 +9,12 @@ enum MessagesConversationStore {
         let hasStoredHandleCountry: Bool
     }
 
+    // Preserve a leading U+FEFF and reject malformed UTF-8 instead of repairing evidence.
+    static func exactUTF8(_ bytes: Data) -> String? {
+        let text = String(decoding: bytes, as: UTF8.self)
+        return text.utf8.elementsEqual(bytes) ? text : nil
+    }
+
     enum WatermarkTable: String { case chat, message }
 
     struct Header {
@@ -137,11 +143,14 @@ enum MessagesConversationStore {
         let usCountry = hasStoredHandleCountry
             ? "CASE WHEN typeof(h.country)='text' AND CAST(h.country AS BLOB) IN (X'5553',X'7573') THEN 1 ELSE 0 END"
             : "0"
+        // A row-ID join treats numeric text such as '.3e1' as 3. An INTEGER cast alone
+        // truncates it to 0. Inspect both sets of candidates before checking storage types.
+        let membership = MessagesNativeTargetLookup.membershipPredicate(column: "j.chat_id", id: chatRowid)
         try scope.forEachRow("""
             SELECT j.chat_id,j.handle_id,h._rowid_ AS actual_handle,\(usCountry) AS us_country,
                    CASE WHEN typeof(h.id)='text' THEN CAST(h.id AS BLOB) END AS address
             FROM chat_handle_join j LEFT JOIN handle h ON h._rowid_=CAST(j.handle_id AS INTEGER)
-            WHERE CAST(j.chat_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 33
+            WHERE \(membership) LIMIT 33
             """, [String(chatRowid)]) { row in
             guard members.count < 32 else { throw Failure.limitExceeded }
             guard case .integer(let chat)? = row.values["chat_id"], chat == chatRowid,
@@ -149,7 +158,7 @@ enum MessagesConversationStore {
                   case .integer(let actual)? = row.values["actual_handle"], actual == joined,
                   case .integer(let usCountry)? = row.values["us_country"],
                   case .blob(let bytes)? = row.values["address"], bytes.count <= 512,
-                  let raw = String(data: bytes, encoding: .utf8) else { throw Failure.invalidObservation }
+                  let raw = exactUTF8(bytes) else { throw Failure.invalidObservation }
             members.append(.init(raw: raw, hasUSCountry: usCountry == 1))
         }
         return members

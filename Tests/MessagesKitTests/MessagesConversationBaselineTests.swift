@@ -21,6 +21,14 @@ struct MessagesConversationBaselineTests {
             deadline: .millisecondsFromNow(5000))
     }
 
+    @Test(arguments: [1, 2])
+    func storedAddressCannotAcquireAnIdentityByDroppingLeadingBytes(_ handle: Int) throws {
+        let fx = try fixture()
+        try fx.exec("UPDATE handle SET id=CAST(x'EFBBBF'||CAST(id AS BLOB) AS TEXT) WHERE rowid=\(handle)")
+        let wanted = handle == 1 ? ["+12125550100"] : ["+12125550101", "+12125550102"]
+        #expect(throws: MessagesConversationStore.Failure.invalidObservation) { try read(fx, wanted) }
+    }
+
     @Test func bindsUniqueDMAndGlobalWatermarks() throws {
         let fx = try fixture()
         try fx.exec("""
@@ -34,6 +42,45 @@ struct MessagesConversationBaselineTests {
         #expect(baseline.matchingConversations[0].rowid == 3)
         #expect(baseline.matchingConversations[0].guid == "iMessage;-;+12125550100")
         #expect(baseline.matchingConversations[0].recipients.map(\.canonical) == ["+12125550100"])
+    }
+
+    @Test func indexedMembershipsKeepUnrelatedGroupsWithinPreviewBudget() throws {
+        let fx = try fixture()
+        try fx.exec("""
+            CREATE INDEX fixture_chat_members ON chat_handle_join(chat_id,handle_id);
+            WITH RECURSIVE n(i) AS (VALUES(1000) UNION ALL SELECT i+1 FROM n WHERE i<1127)
+            INSERT INTO chat(ROWID,guid,style,service_name) SELECT i,'other-dm-'||i,45,'iMessage' FROM n;
+            INSERT INTO chat_handle_join SELECT ROWID,2 FROM chat WHERE ROWID BETWEEN 1000 AND 1127;
+            WITH RECURSIVE n(i) AS (VALUES(2000) UNION ALL SELECT i+1 FROM n WHERE i<3023)
+            INSERT INTO chat(ROWID,guid,style,service_name) SELECT i,'other-group-'||i,43,'SMS' FROM n;
+            WITH RECURSIVE n(i) AS (VALUES(100) UNION ALL SELECT i+1 FROM n WHERE i<123)
+            INSERT INTO handle(ROWID,id,service) SELECT i,'fixture-'||i||'@example.invalid','SMS' FROM n;
+            INSERT INTO chat_handle_join SELECT c.ROWID,h.ROWID FROM chat c,handle h
+                WHERE c.ROWID BETWEEN 2000 AND 3023 AND h.ROWID BETWEEN 100 AND 123;
+            ANALYZE;
+            """)
+        // Allow ordinary row decoding and indexed reads. Cancel a repeated
+        // full membership scan without relying on a wall-clock benchmark.
+        var checks = 0
+        let baseline = try MessagesConversationBaseline.read(databasePath: fx.path,
+            recipients: recipients(), deadline: .millisecondsFromNow(5000), isCancelled: {
+                checks += 1
+                return checks > 8_000
+            })
+        #expect(baseline.matchingConversations.map(\.rowid) == [3])
+    }
+
+    @Test(arguments: ["'.3e1'", "X'3378'", "3.5"])
+    func indexedLookupRefusesMalformedKeysMatchingTheDM(_ key: String) throws {
+        let fx = try fixture()
+        try fx.exec("""
+            ALTER TABLE chat_handle_join RENAME TO original_members;
+            CREATE TABLE chat_handle_join(chat_id BLOB,handle_id INTEGER);
+            CREATE INDEX fixture_chat_members ON chat_handle_join(chat_id,handle_id);
+            INSERT INTO chat_handle_join SELECT chat_id,handle_id FROM original_members;
+            INSERT INTO chat_handle_join VALUES(\(key),2);
+            """)
+        #expect(throws: MessagesConversationStore.Failure.invalidObservation) { try read(fx) }
     }
 
     @Test func absentRecipientDoesNotGuessAnID() throws {

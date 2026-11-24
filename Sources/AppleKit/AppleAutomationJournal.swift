@@ -75,7 +75,7 @@ public enum AppleAutomationJournal {
 
     enum WritePurpose { case ordinary, begin, markUncertain, resolve }
 
-    public struct TargetDigest: Equatable {
+    public struct TargetDigest: Equatable, Sendable {
         public let value: String
         fileprivate init(value: String) { self.value = value }
     }
@@ -641,7 +641,7 @@ public enum AppleAutomationJournal {
         return try parseDigest(string)
     }
 
-    private static func parseDigest(_ value: String) throws -> TargetDigest {
+    package static func parseDigest(_ value: String) throws -> TargetDigest {
         try validateDigest(value)
         return TargetDigest(value: value)
     }
