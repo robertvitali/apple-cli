@@ -191,6 +191,36 @@ struct SQLiteReadTransactionTests {
         #expect(try fresh.rows("SELECT count(*) AS n FROM sample").first?.int("n") == 3)
     }
 
+    @Test func metadataAndAggregatesShareOneBudget() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        let limits = SQLiteReadTransaction.Limits(timeout: 5, rows: 2, bytes: 8192, valueBytes: 4096)
+        #expect(throws: Failure.rowLimit) {
+            try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: limits) { scope in
+                #expect(try scope.schemaRows(.columns, table: "sample").first?.text("name") == "value")
+                let result = try scope.observationRows("SELECT min(value) AS lo, max(value) AS hi FROM sample", [])
+                #expect(result.first?.int("lo") == 1)
+                #expect(result.first?.int("hi") == 2)
+                _ = try scope.schemaRows(.tableList, table: "sample")
+            }
+        }
+    }
+
+    @Test func observationPermissionsEndAtEachStatement() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        let queries = [("SELECT max(value) FROM sample", SQLITE_ERROR), ("PRAGMA main.table_xinfo(sample)", SQLITE_AUTH)]
+        for (sql, code) in queries {
+            #expect(throws: Failure.database(code)) {
+                try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: generous) { scope in
+                    _ = try scope.observationRows("SELECT max(value) FROM sample", [])
+                    _ = try scope.schemaRows(.columns, table: "sample")
+                    try scope.forEachRow(sql) { _ in }
+                }
+            }
+        }
+    }
+
     @Test("typed values preserve NUL text and empty blobs, and binds do not interpolate SQL")
     func typedValues() throws {
         let (url, writer) = try database()

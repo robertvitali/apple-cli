@@ -3,6 +3,32 @@ import AppleKit
 import Darwin
 import CryptoKit
 
+private protocol ChatRows {
+    func rows(_ sql: String, _ binds: [String]) throws -> [SQLiteReader.Row]
+    func schemaRows(_ kind: SQLiteReadTransaction.SchemaRead, table: String) throws -> [SQLiteReader.Row]
+}
+
+private extension ChatRows {
+    func rows(_ sql: String) throws -> [SQLiteReader.Row] { try rows(sql, []) }
+}
+
+extension SQLiteReader: ChatRows {
+    fileprivate func schemaRows(_ kind: SQLiteReadTransaction.SchemaRead, table: String) throws -> [Row] {
+        try rows("PRAGMA main.\(kind.rawValue)(\(table))")
+    }
+}
+
+extension SQLiteReadTransaction: ChatRows {
+    fileprivate func rows(_ sql: String, _ binds: [String]) throws -> [SQLiteReader.Row] {
+        try observationRows(sql, binds)
+    }
+}
+
+struct ReplyDatabaseLocation: Sendable {
+    let path: String
+    let home: String
+}
+
 /// Read layer over `~/Library/Messages/chat.db` (WAL-aware, via the shared
 /// `SQLiteReader` with `copyToTemp` for hot/locked data reads). Ports the SQL +
 /// row-shaping of the Messages oracle's `get_recent_messages`, `fuzzy_search_messages`,
@@ -17,7 +43,8 @@ public struct ChatDB {
         home + "/Library/Messages/chat.db"
     }
 
-    private let reader: SQLiteReader
+    private let reader: any ChatRows
+    let replyLocation: ReplyDatabaseLocation
     // Internal synthetic-test seam; no command or environment control.
     var beforeNativeEditSummaryRead: (() throws -> Void)?
     private let book: AddressBook
@@ -42,9 +69,17 @@ public struct ChatDB {
     /// `SQLiteReader` decision, tracked separately, not made here.
     public init(path: String = ChatDB.defaultPath(), book: AddressBook, copyToTemp: Bool = true,
                 homeDirectoryForTilde: String = FileManager.default.homeDirectoryForCurrentUser.path) throws {
+        replyLocation = ReplyDatabaseLocation(path: path, home: homeDirectoryForTilde)
         self.reader = try SQLiteReader(path: path, copyToTemp: copyToTemp)
         self.book = book
         self.homeDirectoryForTilde = homeDirectoryForTilde
+    }
+
+    init(replyRead: SQLiteReadTransaction, location: ReplyDatabaseLocation, book: AddressBook) {
+        reader = replyRead
+        replyLocation = location
+        homeDirectoryForTilde = location.home
+        self.book = book
     }
 
     // MARK: - Phone/handle resolution (oracle `_get_phone_formats` / `find_handles_by_phone`)
@@ -479,7 +514,7 @@ public struct ChatDB {
     }
 
     private func tableColumns(_ table: String) -> Set<String> {
-        let rows = (try? reader.rows("PRAGMA table_info(\(table))")) ?? []
+        let rows = (try? reader.schemaRows(.ordinaryColumns, table: table)) ?? []
         return Set(rows.compactMap { $0.text("name") })
     }
 
@@ -1019,6 +1054,10 @@ public struct ChatDB {
         // Only action lookups retain the strict decode from the selected row.
         fileprivate let actionBody: NativeMessageParts.Decoded?
 
+        func hasReplyTargetLabel(_ prefix: String) -> Bool {
+            actionBody?.hasLabel(prefix, displayed: body) == true
+        }
+
         func uniqueNativeActionPart(requested: Int?) -> NativeMessageParts.NativePart? {
             actionBody?.uniqueActionPart(requested: requested)
         }
@@ -1082,7 +1121,8 @@ public struct ChatDB {
         let message_guid: String
         let native_part: Int
         let part_guid: String?
-        let participant_handle: String
+        let participants: [String]
+        let isGroup: Bool
         let is_from_me: Bool
         let thread_root: ExactReplyThreadRoot
         let thread_originator: ExactThreadOriginator
@@ -1506,14 +1546,24 @@ public struct ChatDB {
     mutating func exactReplyTarget(chat selector: ExactChatSelector,
                                            message messageSelector: ExactMessageSelector,
                                            partIndex: Int? = nil,
-                                           allowingNested: Bool = false) throws -> ExactReplyTarget {
+                                           allowingNested: Bool = false, allowingGroupPreview: Bool = false) throws -> ExactReplyTarget {
+        try exactReplyTargetWithMessage(chat: selector, message: messageSelector, partIndex: partIndex,
+                                        allowingNested: allowingNested, allowingGroupPreview: allowingGroupPreview).target
+    }
+
+    mutating func exactReplyTargetWithMessage(chat selector: ExactChatSelector, message messageSelector: ExactMessageSelector,
+                                              partIndex: Int?, allowingNested: Bool, allowingGroupPreview: Bool) throws
+        -> (target: ExactReplyTarget, message: ExactMessage) {
         let (chat, message) = try exactGet(chat: selector, message: messageSelector, forNativeAction: true)
         guard message.selected_chat_rowid == chat.rowid else {
             throw AppleError.validation("reply target message is not in the selected conversation")
         }
-        let strictTarget = try exactReplyTargetEvidence(chatRowid: chat.rowid, messageRowid: message.rowid)
-        let participants = try exactParticipantHandles(chatRowid: chat.rowid)
-        guard participants.count == 1 else {
+        let strictTarget = try exactReplyTargetEvidence(chatRowid: chat.rowid, messageRowid: message.rowid,
+                                                      allowingGroupPreview: allowingGroupPreview)
+        let participants = strictTarget.isGroup
+            ? try groupReplyParticipants(chatRowid: chat.rowid)
+            : try exactParticipantHandles(chatRowid: chat.rowid)
+        guard strictTarget.isGroup || participants.count == 1 else {
             throw AppleError.validation("reply target direct conversation must have exactly one participant")
         }
         let isRoot = message.thread_originator.reason == "no-linkage"
@@ -1524,10 +1574,18 @@ public struct ChatDB {
         guard message.thread_originator.available else {
             throw AppleError.validation("reply target thread relationship is unavailable")
         }
-        let nativePart = try resolveExactReplyPart(message, requested: partIndex)
+        let nativePart = try resolveExactReplyPart(message, requested: partIndex,
+                                                   groupMessageGUID: strictTarget.isGroup ? strictTarget.messageGUID : nil)
         let partGUID = message.native_parts?.first(where: { $0.index == nativePart })?.attachment_guid
         let root: ExactReplyThreadRoot
         if isRoot {
+            if strictTarget.isGroup {
+                guard try exactReplyGUIDRowid(strictTarget.messageGUID) == message.rowid else {
+                    throw AppleError.validation("group reply target identity is ambiguous")
+                }
+                try validateNestedReplyMembership(chatRowid: chat.rowid, messageRowid: message.rowid,
+                                                  requiringUnlinkedRoot: true)
+            }
             root = ExactReplyThreadRoot(message_rowid: message.rowid, message_guid: strictTarget.messageGUID,
                                        native_part: nativePart, part_guid: partGUID, is_from_me: strictTarget.isFromMe)
         } else {
@@ -1549,7 +1607,8 @@ public struct ChatDB {
             }
             // Resolve exactly one ancestor, never recurse or search by message text.
             let (_, rootMessage) = try exactGet(chat: .rowid(chat.rowid), message: .rowid(rootRowid), forNativeAction: true)
-            let strictRoot = try exactReplyTargetEvidence(chatRowid: chat.rowid, messageRowid: rootRowid)
+            let strictRoot = try exactReplyTargetEvidence(chatRowid: chat.rowid, messageRowid: rootRowid,
+                                                          allowingGroupPreview: allowingGroupPreview)
             try validateNestedReplyMembership(chatRowid: chat.rowid, messageRowid: rootRowid,
                                               requiringUnlinkedRoot: true)
             guard strictRoot.messageGUID.utf8.elementsEqual(rootGUID.utf8),
@@ -1559,22 +1618,24 @@ public struct ChatDB {
                   rootMessage.uniqueNativeActionPart(requested: nil) != nil else {
                 throw AppleError.validation("nested reply target requires a unique single-part thread root")
             }
-            let resolvedRootPart = try resolveExactReplyPart(rootMessage, requested: rootPart)
+            let resolvedRootPart = try resolveExactReplyPart(rootMessage, requested: rootPart,
+                                                            groupMessageGUID: strictTarget.isGroup ? rootGUID : nil)
             root = ExactReplyThreadRoot(message_rowid: rootRowid, message_guid: strictRoot.messageGUID,
                                        native_part: resolvedRootPart,
                                        part_guid: rootMessage.native_parts?.first(where: { $0.index == resolvedRootPart })?.attachment_guid,
                                        is_from_me: strictRoot.isFromMe)
         }
-        return ExactReplyTarget(chat_rowid: chat.rowid,
+        let target = ExactReplyTarget(chat_rowid: chat.rowid,
                                 chat_guid: strictTarget.chatGUID,
                                 message_rowid: message.rowid,
                                 message_guid: strictTarget.messageGUID,
                                 native_part: nativePart,
                                 part_guid: partGUID,
-                                participant_handle: participants[0],
+                                participants: participants, isGroup: strictTarget.isGroup,
                                 is_from_me: strictTarget.isFromMe,
                                 thread_root: root,
                                 thread_originator: message.thread_originator)
+        return (target, message)
     }
 
     private func exactReplyGUIDRowid(_ guid: String) throws -> Int64 {
@@ -1590,13 +1651,14 @@ public struct ChatDB {
 
     private func validateNestedReplyMembership(chatRowid: Int64, messageRowid: Int64,
                                               requiringUnlinkedRoot: Bool) throws {
-        // Inspect every membership, including joins whose stored IDs SQLite coerces.
+        // Keep malformed competing edges visible until their storage types are checked.
+        let predicate = MessagesNativeTargetLookup.membershipPredicate(column: "cmj.message_id", id: messageRowid)
         let rows = try reader.rows("""
             SELECT cmj.chat_id AS join_chat_id, cmj.message_id AS join_message_id,
                    m.thread_originator_guid, m.thread_originator_part
             FROM chat_message_join cmj
-            JOIN message m ON m.ROWID = cmj.message_id
-            WHERE m.ROWID = CAST(?1 AS INTEGER)
+            LEFT JOIN message m ON m.ROWID = cmj.message_id
+            WHERE \(predicate)
             LIMIT 2
             """, [String(messageRowid)])
         guard rows.count == 1,
@@ -1610,6 +1672,26 @@ public struct ChatDB {
                 throw AppleError.validation("nested reply thread root must have absent native linkage")
             }
         }
+    }
+
+    /// Verify the receipt's emitted identifiers and sole conversation in one database observation.
+    func exactReplyResultBelongsToChat(messageRowid: Int64, guid: String, chatRowid: Int64) throws -> Bool {
+        guard messageRowid > 0, chatRowid > 0, !guid.isEmpty, !guid.utf8.contains(0) else { return false }
+        let membership = MessagesNativeTargetLookup.membershipPredicate(column: "message_id", id: messageRowid)
+        let rows = try reader.rows("""
+            SELECT (
+                SELECT count(*) = 1 AND min(id) = CAST(?1 AS INTEGER)
+                FROM (SELECT ROWID AS id FROM message WHERE guid = ?3 COLLATE BINARY LIMIT 2)
+            ) AS exact_message, (
+                SELECT count(*) = 1 AND min(exact_edge) = 1 FROM (
+                    SELECT typeof(message_id) = 'integer' AND typeof(chat_id) = 'integer'
+                        AND chat_id = CAST(?2 AS INTEGER) AS exact_edge
+                    FROM chat_message_join WHERE \(membership) LIMIT 2
+                )
+            ) AS exclusive_membership
+            """, [String(messageRowid), String(chatRowid), guid])
+        return rows.first?.values["exact_message"] == .integer(1)
+            && rows.first?.values["exclusive_membership"] == .integer(1)
     }
 
     func exactReplyHighwater(chatRowid: Int64) throws -> Int64 {
@@ -1951,10 +2033,12 @@ public struct ChatDB {
     }
 
     private func exactSingleAttachmentJoin(forMessageRowid messageRowid: Int64) throws -> ExactReplyAttachmentJoinResult {
+        _ = try requiredColumns("message_attachment_join", ["message_id", "attachment_id"])
+        let membership = MessagesNativeTargetLookup.membershipPredicate(column: "message_id", id: messageRowid)
         let joinRows = try reader.rows("""
             SELECT message_id, attachment_id
             FROM message_attachment_join
-            WHERE message_id = CAST(?1 AS INTEGER) OR message_id = ?1
+            WHERE \(membership)
             ORDER BY attachment_id
             LIMIT 2
             """, [String(messageRowid)])
@@ -1964,6 +2048,7 @@ public struct ChatDB {
               case .integer(let attachmentRowid)? = join.values["attachment_id"], attachmentRowid > 0 else {
             return .uncertain("malformed-attachment-join")
         }
+        _ = try requiredColumns("attachment", ["ROWID", "guid", "filename", "total_bytes"])
         let rows = try reader.rows("""
             SELECT ROWID AS attachment_rowid, guid AS attachment_guid,
                    filename AS attachment_filename, total_bytes
@@ -1992,9 +2077,11 @@ public struct ChatDB {
     private func verifyAttachmentFile(filename raw: String, expectedSHA256: String, expectedSize: Int,
                                       checkpoint: () throws -> Void) throws -> AttachmentContentProof {
         try checkpoint()
-        guard let path = attachmentPathUnderMessagesRoot(raw) else { return .uncertain("unsafe-attachment-path") }
-        let fd: Int32
-        do { fd = try openAttachmentFileNoFollow(path) } catch { return .uncertain("unsafe-attachment-path") }
+        guard let path = attachmentPathUnderMessagesRoot(raw),
+              let fd = withAttachmentParentNoFollow(path, { parent, name -> Int32? in
+                  let file = openat(parent, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                  return file >= 0 ? file : nil
+              }) else { return .uncertain("unsafe-attachment-path") }
         defer { close(fd) }
         var before = stat()
         guard fstat(fd, &before) == 0,
@@ -2013,9 +2100,15 @@ public struct ChatDB {
             digest.update(data: chunk)
         }
         try checkpoint()
-        var after = stat()
-        guard fstat(fd, &after) == 0,
-              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+        // A renamed parent leaves the open file and its timestamps unchanged.
+        // Resolve the stored name again while the hashed inode is still pinned.
+        guard let finalPath = attachmentPathUnderMessagesRoot(raw),
+              let after = withAttachmentParentNoFollow(finalPath, { parent, name -> stat? in
+                  var current = stat()
+                  guard fstatat(parent, name, &current, AT_SYMLINK_NOFOLLOW) == 0 else { return nil }
+                  return current
+              }) else { return .uncertain("unsafe-attachment-path") }
+        guard before.st_dev == after.st_dev, before.st_ino == after.st_ino,
               before.st_size == after.st_size, before.st_mode == after.st_mode,
               before.st_uid == after.st_uid,
               before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
@@ -2055,24 +2148,21 @@ public struct ChatDB {
         path.utf8.starts(with: "/var/".utf8) ? "/private" + path : path
     }
 
-    private func openAttachmentFileNoFollow(_ absolutePath: String) throws -> Int32 {
+    private func withAttachmentParentNoFollow<T>(_ absolutePath: String,
+                                                 _ inspect: (Int32, String) -> T?) -> T? {
         let components = absolutePath.unicodeScalars.split(separator: "/").map(String.init)
-        guard !components.isEmpty else { throw AppleError.upstream("unsafe attachment path") }
-        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard current >= 0 else { throw AppleError.upstream("unsafe attachment path") }
-        for (index, component) in components.enumerated() {
-            if component == "." || component == ".." || component.isEmpty {
-                close(current); throw AppleError.upstream("unsafe attachment path")
-            }
-            let flags = index == components.count - 1
-                ? (O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
-                : (O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            let next = openat(current, component, flags)
-            close(current)
-            guard next >= 0 else { throw AppleError.upstream("unsafe attachment path") }
-            current = next
+        guard let leaf = components.last, !components.contains("."), !components.contains("..") else { return nil }
+        let flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC
+        var parent = open("/", flags)
+        guard parent >= 0 else { return nil }
+        defer { close(parent) }
+        for component in components.dropLast() {
+            let next = openat(parent, component, flags)
+            guard next >= 0 else { return nil }
+            close(parent)
+            parent = next
         }
-        return current
+        return inspect(parent, leaf)
     }
 
     private func attachmentReplyUncertain(_ reason: String) -> ExactReplyAttachmentCorrespondence {
@@ -2109,7 +2199,7 @@ public struct ChatDB {
         }
         let chatGUIDUnique: Bool
         if chatGUIDSafe, let guid = chat.guid {
-            chatGUIDUnique = try reactionChatGUIDIdentifiesSelectedChat(guid, chatRowid: chat.rowid)
+            chatGUIDUnique = try chatGUIDIdentifiesSelectedChat(guid, chatRowid: chat.rowid)
             if !chatGUIDUnique { unknownReasons.append("target-chat-guid-not-globally-unique") }
         } else {
             chatGUIDUnique = false
@@ -2248,9 +2338,39 @@ public struct ChatDB {
         return handles
     }
 
-    private func exactReplyTargetEvidence(chatRowid: Int64, messageRowid: Int64) throws -> (chatGUID: String, messageGUID: String, isFromMe: Bool) {
+    private func groupReplyParticipants(chatRowid: Int64) throws -> [String] {
+        // A declared _rowid_ (including a generated one) can redirect a join to another handle.
+        let columns = try reader.schemaRows(.columns, table: "handle")
+        guard !columns.contains(where: { $0.text("name")?.lowercased() == "_rowid_" }) else { throw AppleError.validation("group reply handle identity is ambiguous") }
+        let predicate = MessagesNativeTargetLookup.membershipPredicate(column: "j.chat_id", id: chatRowid)
+        let rows = try reader.rows("""
+            SELECT j.chat_id, j.handle_id, h._rowid_ AS owner,
+                   CASE WHEN typeof(h.id)='text' AND length(CAST(h.id AS BLOB)) BETWEEN 1 AND 512
+                        THEN CAST(h.id AS BLOB) END AS address
+            FROM chat_handle_join j LEFT JOIN handle h ON h._rowid_=j.handle_id
+            WHERE \(predicate) LIMIT 33
+            """, [String(chatRowid)])
+        guard (1...32).contains(rows.count) else {
+            throw AppleError.validation("group reply participants are missing or exceed the preview limit")
+        }
+        var addresses = Set<Data>()
+        return try rows.map { row in
+            guard row.values["chat_id"] == .integer(chatRowid),
+                  case .integer(let id)? = row.values["handle_id"], id > 0, row.values["owner"] == .integer(id),
+                  case .blob(let bytes)? = row.values["address"], addresses.insert(bytes).inserted,
+                  let address = try MessagesAttachmentSnapshot.exactText(row.values["address"]),
+                  !address.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw AppleError.validation("group reply participant identity is incomplete or ambiguous")
+            }
+            return address
+        }
+    }
+
+    private func exactReplyTargetEvidence(chatRowid: Int64, messageRowid: Int64,
+                                          allowingGroupPreview: Bool) throws -> (chatGUID: String, messageGUID: String, isFromMe: Bool, isGroup: Bool) {
         let rows = try reader.rows("""
             SELECT c.guid AS chat_guid, c.style AS chat_style,
+                   c.service_name = 'iMessage' COLLATE BINARY AND m.service = 'iMessage' COLLATE BINARY AS imessage,
                    m.guid AS message_guid, m.is_from_me AS is_from_me,
                    cmj.chat_id AS join_chat_id, cmj.message_id AS join_message_id
             FROM chat_message_join cmj
@@ -2270,7 +2390,13 @@ public struct ChatDB {
         guard case .text(let chatGUID)? = row.values["chat_guid"], !chatGUID.isEmpty else {
             throw AppleError.validation("reply target chat is missing a strict GUID")
         }
-        guard case .integer(let style)? = row.values["chat_style"], style == ChatDB.directChatStyle else {
+        let isGroup = row.values["chat_style"] == .integer(ChatDB.groupChatStyle)
+        if isGroup && allowingGroupPreview {
+            guard row.values["imessage"] == .integer(1), chatGUID.utf8.count <= 512, safeReactionTargetGUID(chatGUID),
+                  try chatGUIDIdentifiesSelectedChat(chatGUID, chatRowid: chatRowid) else {
+                throw AppleError.validation("group reply preview requires an exact iMessage conversation and message")
+            }
+        } else if row.values["chat_style"] != .integer(ChatDB.directChatStyle) {
             throw AppleError.validation("reply target must be in a supported direct conversation")
         }
         guard case .text(let messageGUID)? = row.values["message_guid"], !messageGUID.isEmpty else {
@@ -2279,7 +2405,7 @@ public struct ChatDB {
         guard case .integer(let fromMeRaw)? = row.values["is_from_me"], fromMeRaw == 0 || fromMeRaw == 1 else {
             throw AppleError.validation("reply target ownership is malformed")
         }
-        return (chatGUID, messageGUID, fromMeRaw != 0)
+        return (chatGUID, messageGUID, fromMeRaw != 0, isGroup)
     }
 
     private func validateExactReplyMembershipEvidence(chatRowid: Int64) throws {
@@ -2369,9 +2495,18 @@ public struct ChatDB {
                                  message_guid: nil, parent_message_guid: nil, parent_native_part: nil)
     }
 
-    private func resolveExactReplyPart(_ message: ExactMessage, requested: Int?) throws -> Int {
+    private func resolveExactReplyPart(_ message: ExactMessage, requested: Int?, groupMessageGUID: String?) throws -> Int {
         if let requested, requested < 0 { throw AppleError.validation("partIndex must be >= 0") }
-        if let part = message.uniqueNativeActionPart(requested: requested) { return part.index }
+        if let part = message.uniqueNativeActionPart(requested: requested) {
+            if let groupMessageGUID {
+                do {
+                    try NativeMessagesURL.validate(messageGUID: groupMessageGUID, nativePartIndex: part.index, nativePartGUID: nil)
+                } catch {
+                    throw AppleError.validation("group reply target has no valid native part address")
+                }
+            }
+            return part.index
+        }
         if requested != nil { throw AppleError.validation("reply target native part is not proven") }
         guard message.native_parts_available else {
             throw AppleError.validation("reply target native parts are unavailable: \(message.native_parts_reason)")
@@ -2682,7 +2817,7 @@ public struct ChatDB {
         return rows.first?.int("count") == 1
     }
 
-    private func reactionChatGUIDIdentifiesSelectedChat(_ guid: String, chatRowid: Int64) throws -> Bool {
+    private func chatGUIDIdentifiesSelectedChat(_ guid: String, chatRowid: Int64) throws -> Bool {
         let rows = try reader.rows("""
             SELECT ROWID AS rowid FROM chat
             WHERE guid COLLATE BINARY = ?1
@@ -2996,14 +3131,14 @@ public struct ChatDB {
     }
 
     private func requiredColumns(_ table: String, _ required: Set<String>) throws -> Set<String> {
-        let objects = try reader.rows("PRAGMA main.table_list(\(table))")
+        let objects = try reader.schemaRows(.tableList, table: table)
         guard let object = objects.first else {
             throw AppleError.upstream("Messages database is missing required table '\(table)'")
         }
         guard objects.count == 1, object.text("type") == "table" else {
             throw AppleError.upstream("Messages database requires an ordinary table for '\(table)'")
         }
-        let rows = try reader.rows("PRAGMA main.table_xinfo(\(table))")
+        let rows = try reader.schemaRows(.columns, table: table)
         var columns = Set(rows.filter { $0.int("hidden") == 0 }.compactMap { $0.text("name") })
         if required.contains("ROWID") {
             let invalid = AppleError.upstream("Messages database table '\(table)' has no usable native ROWID")
@@ -3013,7 +3148,7 @@ public struct ChatDB {
                 // Only a true integer rowid alias can identify the same record as native joins.
                 guard named.int("hidden") == 0, named.int("pk") == 1,
                       named.text("type")?.uppercased() == "INTEGER" else { throw invalid }
-                let indexes = try reader.rows("PRAGMA main.index_list(\(table))")
+                let indexes = try reader.schemaRows(.indexes, table: table)
                 guard !indexes.contains(where: { $0.text("origin") == "pk" }) else { throw invalid }
             }
             columns.insert("ROWID")

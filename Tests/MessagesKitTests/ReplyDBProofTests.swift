@@ -90,7 +90,7 @@ struct ReplyDBProofTests {
         #expect(target.message_guid == "reply-root")
         #expect(target.native_part == 2)
         #expect(target.part_guid == nil)
-        #expect(target.participant_handle == "+12125550100")
+        #expect(target.participants == ["+12125550100"] && !target.isGroup)
         #expect(target.root_is_from_me == false)
         #expect(target.is_from_me == false)
         #expect(target.thread_root.message_rowid == target.message_rowid)
@@ -517,7 +517,7 @@ struct ReplyDBProofTests {
     @Test func replyProofRejectsMatchingRowsWithMissingGuidOrWrongChat() throws {
         let target = ChatDB.ExactReplyTarget(chat_rowid: 3, chat_guid: "chat-guid", message_rowid: 60,
                                             message_guid: "reply-root", native_part: 2, part_guid: nil,
-                                            participant_handle: "+12125550100", is_from_me: false,
+                                            participants: ["+12125550100"], isGroup: false, is_from_me: false,
                                             thread_root: .init(message_rowid: 60, message_guid: "reply-root", native_part: 2,
                                                                part_guid: nil, is_from_me: false),
                                             thread_originator: .init(available: true, reason: "no-linkage",
@@ -776,6 +776,15 @@ struct ReplyDBProofTests {
                 try weakenMessageAttachmentJoinAffinity(fx)
                 try fx.exec("DELETE FROM message_attachment_join WHERE message_id=\(highwater + 1); INSERT INTO message_attachment_join(message_id, attachment_id) VALUES (\(highwater + 1),'505');")
             }, "malformed-attachment-join"),
+            ("competing-noncanonical-membership", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                let rowid = highwater + 1
+                try insertAttachmentReplyResult(fx, rowid: rowid, guid: "ambiguous-membership", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 505,
+                                                attachmentGUID: "a505", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+                try weakenMessageAttachmentJoinAffinity(fx)
+                try fx.exec("INSERT INTO message_attachment_join VALUES ('0\(rowid)', 506)")
+            }, "duplicate-attachment-joins"),
             ("duplicate-join", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
                 try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "duplicate-join", textSQL: "NULL", chatRowid: 3,
                                                 parentGUID: "reply-root", parentPart: "2", attachmentRowid: 506,
@@ -887,6 +896,51 @@ struct ReplyDBProofTests {
         }
     }
 
+    @Test(arguments: ["unchanged", "missing", "same-bytes", "different-bytes", "symlink"])
+    func attachmentReplyRechecksPersistedPathAfterReading(_ replacement: String) throws {
+        let fx = try replyFixture()
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        let storedPath = URL(fileURLWithPath: fx.presentAttachmentPath)
+        let original = try Data(contentsOf: storedPath)
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "test-reply",
+                                        textSQL: "NULL", chatRowid: 3, parentGUID: "reply-root", parentPart: "2",
+                                        attachmentRowid: 401, attachmentGUID: "test-file", filename: storedPath.path,
+                                        totalBytesSQL: String(original.count))
+        db = try makeDB(fx)
+        let scan = try db.exactReplyRows(chatRowid: 3, afterHighwater: highwater)
+        var checks = 0
+        let proof = try db.exactReplyAttachmentCorrespondence(
+            scan: scan, target: target, expectedAttachmentSHA256: sha256(original),
+            expectedAttachmentSize: original.count
+        ) {
+            checks += 1
+            // The prior chunk is now hashed and the original descriptor is still open.
+            guard checks == 5, replacement != "unchanged" else { return }
+            let directory = storedPath.deletingLastPathComponent()
+            let moved = directory.deletingLastPathComponent().appendingPathComponent("original")
+            try FileManager.default.moveItem(at: directory, to: moved)
+            switch replacement {
+            case "same-bytes", "different-bytes":
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+                try (replacement == "same-bytes" ? original : Data(repeating: 0, count: original.count)).write(to: storedPath)
+            case "symlink":
+                try FileManager.default.createSymbolicLink(at: directory, withDestinationURL: moved)
+            default: break
+            }
+        }
+        #expect(checks >= 5)
+        if replacement == "unchanged" {
+            #expect(proof.status == "verified")
+            #expect(proof.attachment_sha256 == sha256(original))
+        } else {
+            #expect(proof.status == "uncertain")
+            #expect(proof.attachment_sha256 == nil)
+            #expect(proof.message_guid == nil)
+        }
+    }
+
     @Test func attachmentReplyProofChecksCancellationDuringContentRead() throws {
         let fx = try replyFixture()
         var db = try makeDB(fx)
@@ -909,6 +963,46 @@ struct ReplyDBProofTests {
                                                           })
         }
         #expect(checkpoints == 5)
+    }
+
+    @Test func boundedReplyReadRefusesAnOversizedStoredBody() throws {
+        let fx = try replyFixture()
+        let db = try makeDB(fx)
+        let location = db.replyLocation
+        var dependencies = MessagesCommandDependencies.live
+        dependencies.replyDatabaseLocation = { _ in location }
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertReplyResult(fx, rowid: highwater + 1, guid: "oversized-reply", text: "reply", chatRowid: 3,
+                              parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
+        try fx.exec("UPDATE message SET attributedBody=zeroblob(16777217) WHERE guid='oversized-reply'")
+        #expect(throws: SQLiteReadTransaction.Failure.valueLimit) {
+            try dependencies.withReplyDatabase(book: friendBook, deadline: .millisecondsFromNow(5_000)) { reader in
+                try reader.exactReplyRows(chatRowid: 3, afterHighwater: highwater)
+            }
+        }
+    }
+
+    @Test(arguments: ["guid", "filename", "total_bytes"])
+    func attachmentReplyRequiresStoredProofColumns(_ column: String) throws {
+        let fx = try replyFixture()
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        let bytes = Data([42])
+        try bytes.write(to: URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments/zz/a.bin"))
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "reply", textSQL: "NULL", chatRowid: 3,
+                                        parentGUID: "reply-root", parentPart: "2", attachmentRowid: 401,
+                                        attachmentGUID: "a401", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                        totalBytesSQL: "1")
+        try fx.exec("""
+            ALTER TABLE attachment RENAME COLUMN \(column) TO stored_value;
+            ALTER TABLE attachment ADD COLUMN \(column) GENERATED ALWAYS AS (stored_value) VIRTUAL;
+            """)
+        var updated = try makeDB(fx)
+        #expect(throws: AppleError.self) {
+            try updated.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater, target: target,
+                                                          expectedAttachmentSHA256: sha256(bytes), expectedAttachmentSize: 1)
+        }
     }
 
     @Test(arguments: ["error", "is_sent"])

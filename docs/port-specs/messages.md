@@ -222,8 +222,8 @@ against a historical value (Q12 [1]).
 
 `apple messages reply send` is a CLI-only experimental write built on exact read
 evidence plus the shared Messages UI automation journal. It targets an exact message
-inside one direct conversation by exact chat selector, exact message selector and
-native part index. It does not use body text, latest-message order, a parent lookup
+by exact chat selector, exact message selector and native part index.
+Sending requires a direct conversation. It does not use body text, latest-message order, a parent lookup
 or raw `thread_originator` metadata alone to authorize the write.
 
 Dry run resolves the same exact target and sandbox policy but performs no UI work
@@ -232,7 +232,10 @@ reply text is supplied as `--body` (the global `--text` flag is already the outp
 format selector), must be nonempty, and is capped at 2048 UTF-8 bytes; the private
 worker payload is capped at 4096 encoded bytes. Sandbox mode requires the target
 selected body and outgoing reply body to carry the canonical `apple-cli-test` prefix
-and requires exactly one participant in `APPLE_TEST_RECIPIENTS`. Group replies remain unsupported. Single-file attachment replies use the shared
+and requires exactly one participant in `APPLE_TEST_RECIPIENTS`. Outside sandbox
+mode, dry run also resolves exact group reply targets for text and single-file
+attachments and omits participant addresses from preview output. Single-file
+attachment replies use the shared
 path policy, bounded private staging, and persisted file-content verification.
 
 The UI phase opens the exact native Messages URL, retains the canonical process,
@@ -261,7 +264,7 @@ operation unverified rather than authorizing success. The result reports
 GUID, the parent GUID/part, and the exact target.
 
 Nested targets additionally require a unique single-part selected message and one
-unique, single-part, unlinked root in the same direct conversation. The parent binds
+unique, single-part, unlinked root in the same conversation. The parent binds
 both identities, ownership, native parts and raw originator metadata before handoff,
 on every proof pass, and after final UI cleanup verification. Multi-hop chains are
 refused. The target exposes selected `is_from_me`, `thread_root`, and root ownership

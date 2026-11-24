@@ -1914,12 +1914,19 @@ final class LiveMessagesReactionAXDriver: MessagesReactionAXDriving {
         catch { throw MessagesReactionAXAutomation.reactionError(from: error) }
     }
 
-    static func checkWindowsBeforeOpen(root: any MessagesAXElement, deadline: WorkerDeadline) throws {
+    static func checkWindowsBeforeOpen(root: any MessagesAXElement, inspected: [any MessagesAXElement]? = nil,
+                                       deadline: WorkerDeadline) throws {
         // A locked desktop can list the application itself as a window.
         // Refuse that response before LaunchServices receives the navigation URL.
         let windows = try root.directWindows(limit: 256, deadline: deadline)
         guard !windows.contains(where: { root.sameIdentity(as: $0) }) else {
             throw MessagesReactionAXError.targetDrift
+        }
+        if let inspected {
+            // Reply inspection admits zero windows, one scene, or one scene with a distinct sharing overlay.
+            guard inspected.count == windows.count, inspected.allSatisfy({ original in
+                windows.contains { original.sameIdentity(as: $0) }
+            }) else { throw MessagesReactionAXError.targetDrift }
         }
     }
 
@@ -1935,20 +1942,39 @@ final class LiveMessagesReactionAXDriver: MessagesReactionAXDriving {
     }
 
     func openMessages(url: URL, deadline: WorkerDeadline) throws -> MessagesAXProcess {
+        try openMessages(url: url, deadline: deadline, revalidateInspectedProcess: false, inspectExisting: { _ in nil })
+    }
+
+    func openMessages(url: URL, deadline: WorkerDeadline,
+                      inspectExisting: (MessagesAXProcess) throws -> [any MessagesAXElement]?) throws -> MessagesAXProcess {
+        try openMessages(url: url, deadline: deadline, revalidateInspectedProcess: true, inspectExisting: inspectExisting)
+    }
+
+    private func openMessages(url: URL, deadline: WorkerDeadline, revalidateInspectedProcess: Bool,
+                              inspectExisting: (MessagesAXProcess) throws -> [any MessagesAXElement]?) throws -> MessagesAXProcess {
         try checkDeadline(deadline)
         guard Bundle(url: Self.applicationURL)?.bundleIdentifier == Self.bundleIdentifier else {
             throw MessagesReactionAXError.targetDrift
         }
-        let existing = try NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).map(identity)
+        func runningIdentities() throws -> [MessagesAXProcessIdentity] {
+            try NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).map(identity)
+        }
+        let existing = try runningIdentities()
         guard existing.count <= 1 else { throw MessagesReactionAXError.targetDrift }
         if let running = existing.first {
             let root = LiveAXElement(element: AXUIElementCreateApplication(running.pid))
-            try Self.checkWindowsBeforeOpen(root: root, deadline: deadline)
+            let inspected = try inspectExisting(MessagesAXProcess(identity: running, root: root))
+            try Self.checkWindowsBeforeOpen(root: root, inspected: inspected, deadline: deadline)
         }
         let result = OpenResult()
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.createsNewApplicationInstance = false
+        // The draft and window checks belong to the process we inspected.
+        // A launch, exit or relaunch during inspection invalidates the handoff.
+        if revalidateInspectedProcess {
+            guard try runningIdentities() == existing else { throw MessagesReactionAXError.targetDrift }
+        }
         try Self.checkSessionBeforeOpen(CGSessionCopyCurrentDictionary() as NSDictionary?)
         try checkDeadline(deadline)
         NSWorkspace.shared.open([url], withApplicationAt: Self.applicationURL, configuration: configuration) { app, error in

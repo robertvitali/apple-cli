@@ -27,6 +27,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
     let expectedBodySHA256: String
     let expectedBodyUTF8Length: Int
     let requiredBodyPrefix: String
+    let sandboxPrefix: String?
     let text: String?
     let attachmentDraft: MessagesReplyAttachmentDraftEvidence?
 
@@ -45,6 +46,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         case expectedBodySHA256 = "expected_body_sha256"
         case expectedBodyUTF8Length = "expected_body_utf8_length"
         case requiredBodyPrefix = "required_body_prefix"
+        case sandboxPrefix = "sandbox_prefix"
         case text
         case attachmentDraft = "attachment_draft"
     }
@@ -63,7 +65,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
          text: String?,
          attachmentDraft: MessagesReplyAttachmentDraftEvidence? = nil,
          expectedThreadRelationshipSHA256: String? = nil,
-         explicitPart: Bool = true, expectedAttachmentGUID: String? = nil) throws {
+         explicitPart: Bool = true, expectedAttachmentGUID: String? = nil, sandboxPrefix: String? = nil) throws {
         guard !chatGUID.isEmpty, chatGUID.utf8.count <= 512,
               expectedChatRowID > 0, expectedMessageRowID > 0,
               !expectedParticipantHandles.isEmpty, expectedParticipantHandles.count <= 32,
@@ -75,6 +77,13 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         if let guid = expectedAttachmentGUID, guid.isEmpty || guid.utf8.count > 512 {
             throw MessagesReplyComposerAXError.invalidPayload
         }
+        if let sandboxPrefix {
+            guard !sandboxPrefix.isEmpty, sandboxPrefix.utf8.count <= 512,
+                  !sandboxPrefix.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
+                throw MessagesReplyComposerAXError.invalidPayload
+            }
+        }
+        self.sandboxPrefix = sandboxPrefix
         self.explicitPart = explicitPart
         self.expectedAttachmentGUID = expectedAttachmentGUID
         if let digest = expectedThreadRelationshipSHA256 {
@@ -126,7 +135,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
                       attachmentDraft: c.decodeIfPresent(MessagesReplyAttachmentDraftEvidence.self, forKey: .attachmentDraft),
                       expectedThreadRelationshipSHA256: c.decodeIfPresent(String.self, forKey: .expectedThreadRelationshipSHA256),
                       explicitPart: c.decodeIfPresent(Bool.self, forKey: .explicitPart) ?? false,
-                      expectedAttachmentGUID: c.decodeIfPresent(String.self, forKey: .expectedAttachmentGUID))
+                      expectedAttachmentGUID: c.decodeIfPresent(String.self, forKey: .expectedAttachmentGUID),
+                      sandboxPrefix: c.decodeIfPresent(String.self, forKey: .sandboxPrefix))
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -145,6 +155,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         try c.encode(expectedBodySHA256, forKey: .expectedBodySHA256)
         try c.encode(expectedBodyUTF8Length, forKey: .expectedBodyUTF8Length)
         try c.encode(requiredBodyPrefix, forKey: .requiredBodyPrefix)
+        try c.encodeIfPresent(sandboxPrefix, forKey: .sandboxPrefix)
         try c.encodeIfPresent(text, forKey: .text)
         try c.encodeIfPresent(attachmentDraft, forKey: .attachmentDraft)
     }

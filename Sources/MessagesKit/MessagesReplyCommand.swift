@@ -18,7 +18,7 @@ struct Reply: ParsableCommand {
 
 struct ReplySend: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "send",
-                                                    abstract: "Send a text or attachment reply to an exact message in a direct chat.")
+                                                    abstract: "Send a direct reply or preview a group reply to an exact message.")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Local conversation ROWID from chat.ROWID.") var chatRowid: Int64?
     @Option(name: .long, help: "Conversation GUID from chat.guid.") var chatGuid: String?
@@ -40,7 +40,7 @@ private struct ReplyResolvedTarget {
     let target: ChatDB.ExactReplyTarget
     let selection: ReplySendOptions
     let message: ChatDB.ExactMessage
-    let participants: [String]
+    var participants: [String] { target.participants }
     let text: String?
     let attachmentDraft: MessagesReplyAttachmentDraftEvidence?
     let highwater: Int64?
@@ -113,7 +113,8 @@ private struct ReplyTargetOutput: Encodable {
     let message_rowid: Int64
     let message_guid: String
     let native_part: Int
-    let participant_handle: String
+    let participant_handle: String?
+    let participant_count: Int?
     let root_is_from_me: Bool
     let is_from_me: Bool
     let thread_root: ReplyThreadRootOutput
@@ -214,22 +215,53 @@ private struct ReplyAccessibilityDenied: Error, CustomStringConvertible {
     let description = "accessibility-not-trusted: enable Accessibility for apple or the host app shown by macOS in System Settings > Privacy & Security > Accessibility, then retry"
 }
 
+extension MessagesCommandDependencies {
+    func withReplyDatabase<T>(book: AddressBook, deadline: WorkerDeadline,
+                              isCancelled: @escaping () -> Bool = { false },
+                              _ body: (inout ChatDB) throws -> T) throws -> T {
+        guard !isCancelled() else { throw WorkerProtocolError.cancelled }
+        let location = try replyDatabaseLocation(book)
+        let remaining = deadline.remainingNanoseconds
+        guard remaining > 0 else { throw WorkerProtocolError.deadlineExpired }
+        let limits = SQLiteReadTransaction.Limits(timeout: min(5, Double(remaining) / 1_000_000_000),
+                                                  rows: 16_384, bytes: 64 << 20, valueBytes: 16 << 20)
+        do {
+            return try SQLiteReader.withBoundedReadTransaction(path: location.path, limits: limits,
+                                                               isCancelled: isCancelled) { transaction in
+                var db = ChatDB(replyRead: transaction, location: location, book: book)
+                return try body(&db)
+            }
+        } catch SQLiteReadTransaction.Failure.deadline {
+            throw WorkerProtocolError.deadlineExpired
+        } catch SQLiteReadTransaction.Failure.cancelled {
+            throw WorkerProtocolError.cancelled
+        }
+    }
+}
+
 private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDependencies, options: ReplySend) throws {
     try runGuarded(tool: tool) {
         let input = try resolveReplyInput(text: options.text, file: options.file, home: FileManager.default.homeDirectoryForCurrentUser.path)
         let gate = try dependencies.resolveGate(global)
         let book = dependencies.loadAddressBook()
-        var previewDB = try dependencies.makeChatDB(book)
-        let previewTarget = try resolveReplyTarget(db: &previewDB, options: options, input: input, attachmentDraft: nil, highwater: nil)
-        try validateReplySandbox(target: previewTarget, db: previewDB, gate: gate)
+        let sandboxPrefix = gate.sandboxActive ? gate.sandboxPrefix : nil
+        let previewTarget = try dependencies.withReplyDatabase(book: book, deadline: .millisecondsFromNow(5_000)) { db in
+            try resolveReplyTarget(db: &db, options: options, input: input, attachmentDraft: nil, highwater: nil,
+                                   sandboxPrefix: sandboxPrefix, allowingGroupPreview: !gate.willExecute && !gate.sandboxActive)
+        }
+        try validateReplySandbox(target: previewTarget, gate: gate)
 
         guard gate.willExecute else {
             let data = ReplyPreview(action: "messages-reply-send", experimental: true, executed: false, dry_run: true,
                                     target: outputTarget(previewTarget), text: input.text, text_utf8_bytes: input.text?.utf8.count,
                                     attachment: input.attachmentPreview,
-                                    note: "Dry run - no UI worker launched and no automation journal state created.")
+                                    note: previewTarget.target.isGroup ? "Group reply target resolved. Group sending is unavailable."
+                                        : "Dry run - no UI worker launched and no automation journal state created.")
             try emitWrite(global, data, sandboxActive: gate.sandboxActive) {
-                "[dry-run] would send Messages reply to message \(previewTarget.target.message_rowid)"
+                if previewTarget.target.isGroup {
+                    return "[dry-run] resolved group reply to message \(previewTarget.target.message_rowid). Group sending is unavailable."
+                }
+                return "[dry-run] would send Messages reply to message \(previewTarget.target.message_rowid)"
             }
             return
         }
@@ -239,19 +271,26 @@ private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDe
 
         let stateRoot = dependencies.messagesAutomationStateRoot()
         let observation = ReplyObservation()
+        func cleanupBeforeCompletedPreflight() {
+            guard !observation.hasStartingCleanState() else { return }
+            try? cleanupReplyAttachmentDraftIfPresent(observation.target()?.attachmentDraft)
+        }
+        let actionDeadline = WorkerDeadline.millisecondsFromNow(30_000)
         let outcome: WorkerObservedOutcome
         do {
             outcome = try dependencies.launchObservedWorker(WorkerObservedAction(
             stateRoot: stateRoot,
-            deadline: .millisecondsFromNow(30_000),
+            deadline: actionDeadline,
             resolve: {
-                var db = try dependencies.makeChatDB(book)
-                let highwater = try db.exactReplyHighwater(chatRowid: previewTarget.target.chat_rowid)
                 let attachmentDraft = try input.prepareAttachmentDraftIfNeeded(stateRoot: stateRoot, deadline: .millisecondsFromNow(10_000))
                 do {
-                    let resolved = try resolveReplyTarget(db: &db, options: options, input: input, attachmentDraft: attachmentDraft, highwater: highwater)
+                    let resolved = try dependencies.withReplyDatabase(book: book, deadline: actionDeadline) { db in
+                        let highwater = try db.exactReplyHighwater(chatRowid: previewTarget.target.chat_rowid)
+                        return try resolveReplyTarget(db: &db, options: options, input: input, attachmentDraft: attachmentDraft,
+                                                      highwater: highwater, sandboxPrefix: sandboxPrefix)
+                    }
                     guard sameReplyTargetIdentity(resolved, previewTarget) else { throw ReplyTargetDrift() }
-                    try validateReplySandbox(target: resolved, db: db, gate: gate)
+                    try validateReplySandbox(target: resolved, gate: gate)
                     guard let binding = resolved.binding, let workerCommand = resolved.workerCommand else { throw WorkerProtocolError.malformedFrame }
                     observation.recordResolved(resolved)
                     return try WorkerResolvedAction(target: binding) { _ in workerCommand }
@@ -262,17 +301,22 @@ private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDe
             },
             preflight: { resolved, context in
                 let original = try observation.resolved(matching: resolved.command)
-                var db = try dependencies.makeChatDB(book)
-                guard let fresh = try loadBoundReplyTarget(db: &db, expected: original, input: input, highwater: original.highwater) else {
+                let current = try dependencies.withReplyDatabase(book: book, deadline: context.deadline,
+                                                                 isCancelled: { context.isCancelled }) { db in
+                    try loadBoundReplyTarget(db: &db, expected: original, input: input, highwater: original.highwater)
+                }
+                guard let fresh = current else {
                     throw ReplyTargetDrift()
                 }
-                try validateReplySandbox(target: fresh, db: db, gate: gate)
+                try validateReplySandbox(target: fresh, gate: gate)
                 try requireReplyAccessibility(dependencies.accessibilityDiagnostic())
                 guard let payload = original.payload else { throw WorkerProtocolError.malformedFrame }
                 let clean = try dependencies.captureReplyCleanState(payload.probeRequest(), context.deadline)
                 guard let initialHighwater = original.highwater else { throw WorkerProtocolError.malformedFrame }
-                let dispatchDB = try dependencies.makeChatDB(book)
-                let dispatchHighwater = try dispatchDB.exactReplyHighwater(chatRowid: original.target.chat_rowid)
+                let dispatchHighwater = try dependencies.withReplyDatabase(book: book, deadline: context.deadline,
+                                                                          isCancelled: { context.isCancelled }) { db in
+                    try db.exactReplyHighwater(chatRowid: original.target.chat_rowid)
+                }
                 observation.recordPreflight(cleanState: clean, highwater: max(initialHighwater, dispatchHighwater))
                 return .requiresMutation
             },
@@ -283,15 +327,17 @@ private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDe
                 guard response.category == .ack, MessagesReplySendACKDetail.isVerified(response.detail) else { return nil }
                 let preflight = try observation.preflight()
                 let highwater = preflight.highwater
-                let proof = try pollReplyProof(dependencies: dependencies, book: book, expected: original,
-                                               highwater: highwater, input: input, attachmentDraft: original.attachmentDraft, context: context)
-                guard proof.status == "verified" else { return nil }
+                func observe(additionalPolls: Int) throws -> PolledReplyProof {
+                    try pollReplyProof(dependencies: dependencies, book: book, expected: original,
+                                       highwater: highwater, input: input, attachmentDraft: original.attachmentDraft,
+                                       context: context, additionalPolls: additionalPolls)
+                }
+                let first = try observe(additionalPolls: 20)
+                guard first.status == "verified" else { return nil }
                 guard let payload = original.payload else { throw WorkerProtocolError.malformedFrame }
                 _ = try dependencies.verifyReplyCleanState(payload.probeRequest(), preflight.cleanState, context.deadline)
-                var finalDB = try dependencies.makeChatDB(book)
-                guard try loadBoundReplyTarget(db: &finalDB, expected: original, input: input, highwater: highwater) != nil else {
-                    throw ReplyTargetDrift()
-                }
+                let proof = try observe(additionalPolls: 0)
+                guard proof.matchesVerifiedReceipt(first) else { return nil }
                 let verification = proof.relationship == .threadRoot
                     ? (input.text == nil
                         ? "observedState: UI clean state, database thread-root correspondence, and attachment content verified"
@@ -305,9 +351,7 @@ private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDe
             }
         ))
         } catch {
-            if !observation.hasStartingCleanState() {
-                try? cleanupReplyAttachmentDraftIfPresent(observation.target()?.attachmentDraft)
-            }
+            cleanupBeforeCompletedPreflight()
             throw error
         }
 
@@ -346,8 +390,10 @@ private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDe
                                    })
             try emitWrite(global, ExecutedWrite(data), sandboxActive: gate.sandboxActive) { verification }
         case .timedOut:
+            cleanupBeforeCompletedPreflight()
             throw AppleError.upstream("Messages reply automation timed out; send may have occurred. An unresolved pending operation may block later writes until `messages automation status` and `messages automation recover` resolve it")
         case .cancelled:
+            cleanupBeforeCompletedPreflight()
             throw AppleError.upstream("Messages reply automation was cancelled; send may have occurred. Check `messages automation status` before retrying")
         case .verificationFailed:
             throw AppleError.upstream("Messages reply automation could not verify UI cleanup and database correspondence; send may have occurred. Check `messages automation status` before retrying")
@@ -410,17 +456,20 @@ private protocol ReplyTargetOptions {
 extension ReplySend: ReplyTargetOptions {}
 
 private func resolveReplyTarget(db: inout ChatDB, options: any ReplyTargetOptions, input: ReplyInput,
-                                attachmentDraft: MessagesReplyAttachmentDraftEvidence?, highwater: Int64?) throws -> ReplyResolvedTarget {
-    let target = try db.exactReplyTarget(chat: try parseReplyChatSelector(rowid: options.chatRowid, guid: options.chatGuid),
-                                         message: try parseReplyMessageSelector(rowid: options.messageRowid, guid: options.messageGuid),
-                                         partIndex: options.partIndex, allowingNested: true)
-    let (_, message) = try db.exactGet(chat: .rowid(target.chat_rowid), message: .rowid(target.message_rowid))
-    let participants = try db.exactParticipantHandles(chatRowid: target.chat_rowid)
+                                attachmentDraft: MessagesReplyAttachmentDraftEvidence?, highwater: Int64?,
+                                sandboxPrefix: String?, allowingGroupPreview: Bool = false) throws -> ReplyResolvedTarget {
+    let (target, message) = try db.exactReplyTargetWithMessage(
+        chat: try parseReplyChatSelector(rowid: options.chatRowid, guid: options.chatGuid),
+        message: try parseReplyMessageSelector(rowid: options.messageRowid, guid: options.messageGuid),
+        partIndex: options.partIndex, allowingNested: true, allowingGroupPreview: allowingGroupPreview)
+    if let prefix = sandboxPrefix, !message.hasReplyTargetLabel(prefix) {
+        throw AppleError.safetyViolation("sandboxed Messages reply target must be labeled \(prefix)")
+    }
     let body = message.body ?? ""
     let relationshipDigest = try replyRelationshipDigest(target)
     let payload: MessagesReplySendRequest?
     let payloadData: Data?
-    if input.text != nil || attachmentDraft != nil {
+    if !target.isGroup && (input.text != nil || attachmentDraft != nil) {
         do {
             let built = try MessagesReplySendRequest(chatGUID: target.chat_guid ?? "",
                                                      messageGUID: target.message_guid,
@@ -428,7 +477,7 @@ private func resolveReplyTarget(db: inout ChatDB, options: any ReplyTargetOption
                                                      nativePartGUID: "p:\(target.native_part)/\(target.message_guid)",
                                                      expectedChatRowID: target.chat_rowid,
                                                      expectedMessageRowID: target.message_rowid,
-                                                     expectedParticipantHandles: participants,
+                                                     expectedParticipantHandles: target.participants,
                                                      expectedIsFromMe: target.is_from_me,
                                                      expectedBodySHA256: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: body).value,
                                                      expectedBodyUTF8Length: body.utf8.count,
@@ -437,7 +486,7 @@ private func resolveReplyTarget(db: inout ChatDB, options: any ReplyTargetOption
                                                      attachmentDraft: attachmentDraft,
                                                      expectedThreadRelationshipSHA256: relationshipDigest,
                                                      explicitPart: options.partIndex != nil,
-                                                     expectedAttachmentGUID: target.part_guid)
+                                                     expectedAttachmentGUID: target.part_guid, sandboxPrefix: sandboxPrefix)
             payload = built
             payloadData = try built.workerPayloadData()
         } catch {
@@ -462,7 +511,7 @@ private func resolveReplyTarget(db: inout ChatDB, options: any ReplyTargetOption
     } else {
         binding = nil
     }
-    return ReplyResolvedTarget(target: target, selection: ReplySendOptions(options), message: message, participants: participants, text: input.text,
+    return ReplyResolvedTarget(target: target, selection: ReplySendOptions(options), message: message, text: input.text,
                                attachmentDraft: attachmentDraft, highwater: highwater, payload: payload,
                                workerCommand: try payloadData.map { try WorkerCommand(name: "messages.reply.send", payload: $0) },
                                binding: binding, relationshipDigest: relationshipDigest)
@@ -484,7 +533,8 @@ private func sameReplyTargetIdentity(_ fresh: ReplyResolvedTarget, _ expected: R
 
 private func loadBoundReplyTarget(db: inout ChatDB, expected: ReplyResolvedTarget, input: ReplyInput, highwater: Int64?) throws -> ReplyResolvedTarget? {
     let fresh = try resolveReplyTarget(db: &db, options: expected.selection, input: input,
-                                       attachmentDraft: expected.attachmentDraft, highwater: highwater)
+                                       attachmentDraft: expected.attachmentDraft, highwater: highwater,
+                                       sandboxPrefix: expected.payload?.sandboxPrefix)
     guard sameReplyTargetIdentity(fresh, expected) else { return nil }
     if let lhs = fresh.workerCommand, let rhs = expected.workerCommand {
         guard sameReplyWorkerCommand(lhs, rhs) else { return nil }
@@ -525,16 +575,13 @@ private func parseReplyMessageSelector(rowid: Int64?, guid: String?) throws -> C
     }
 }
 
-private func validateReplySandbox(target: ReplyResolvedTarget, db: ChatDB, gate: MessagesWriteGuard.Gate) throws {
+private func validateReplySandbox(target: ReplyResolvedTarget, gate: MessagesWriteGuard.Gate) throws {
     guard gate.sandboxActive else { return }
     let prefix = gate.sandboxPrefix
     if let text = target.text {
-        guard text.hasPrefix(prefix) else {
+        guard text.utf8.starts(with: prefix.utf8) else {
             throw AppleError.safetyViolation("sandboxed Messages reply text must start with \(prefix)")
         }
-    }
-    guard (target.message.body ?? "").hasPrefix(prefix) else {
-        throw AppleError.safetyViolation("sandboxed Messages reply target must be labeled \(prefix)")
     }
     guard target.participants.count == 1, let participant = target.participants.first else {
         throw AppleError.safetyViolation("sandboxed Messages reply requires one direct recipient")
@@ -553,55 +600,79 @@ private struct PolledReplyProof {
     let status: String
     let textProof: ChatDB.ExactReplyCorrespondence?
     let attachmentProof: ChatDB.ExactReplyAttachmentCorrespondence?
+
+    func matchesVerifiedReceipt(_ first: Self) -> Bool {
+        // Each sample verifies the expected payload and parent independently. The
+        // receipt must also identify exactly the same message and attachment.
+        guard status == "verified", relationship == first.relationship,
+              textProof == first.textProof, attachmentProof == first.attachmentProof else { return false }
+        return byteEqual(textProof?.message_guid ?? attachmentProof?.message_guid,
+                         first.textProof?.message_guid ?? first.attachmentProof?.message_guid)
+            && byteEqual(attachmentProof?.attachment_guid, first.attachmentProof?.attachment_guid)
+            && byteEqual(attachmentProof?.attachment_filename, first.attachmentProof?.attachment_filename)
+    }
+
+    func hasUniqueDestination(in db: ChatDB, chatRowid: Int64) throws -> Bool {
+        guard let rowid = textProof?.message_rowid ?? attachmentProof?.message_rowid,
+              let guid = textProof?.message_guid ?? attachmentProof?.message_guid else { return false }
+        return try db.exactReplyResultBelongsToChat(messageRowid: rowid, guid: guid, chatRowid: chatRowid)
+    }
 }
 
 private func pollReplyProof(dependencies: MessagesCommandDependencies, book: AddressBook,
                             expected: ReplyResolvedTarget, highwater: Int64,
                             input: ReplyInput, attachmentDraft: MessagesReplyAttachmentDraftEvidence?,
-                            context: WorkerObservedContext) throws -> PolledReplyProof {
+                            context: WorkerObservedContext, additionalPolls: Int) throws -> PolledReplyProof {
     var last = PolledReplyProof(relationship: .requestedTarget, status: "waiting", textProof: nil, attachmentProof: nil)
-    for attempt in 0...20 {
+    for attempt in 0...additionalPolls {
         guard !context.isCancelled else { throw WorkerProtocolError.cancelled }
         guard !context.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
-        var db = try dependencies.makeChatDB(book)
-        guard try loadBoundReplyTarget(db: &db, expected: expected, input: input, highwater: highwater) != nil else {
-            throw ReplyTargetDrift()
+        last = try dependencies.withReplyDatabase(book: book, deadline: context.deadline,
+                                                  isCancelled: { context.isCancelled }) { db in
+            guard try loadBoundReplyTarget(db: &db, expected: expected, input: input, highwater: highwater) != nil else {
+                throw ReplyTargetDrift()
+            }
+            let target = expected.target
+            let scan = try db.exactReplyRows(chatRowid: target.chat_rowid, afterHighwater: highwater)
+            let proofResult: PolledReplyProof
+            if let expectedText = input.text {
+                var proof = try ChatDB.judgeExactReplyCorrespondence(scan: scan, target: target, expectedText: expectedText)
+                var relationship = ReplyProofRelationship.requestedTarget
+                if expected.relationshipDigest != nil, proof.reason == "matching-row-wrong-parent" {
+                    proof = try ChatDB.judgeExactReplyThreadRootCorrespondence(scan: scan, target: target, expectedText: expectedText)
+                    relationship = .threadRoot
+                }
+                proofResult = PolledReplyProof(relationship: relationship, status: proof.status, textProof: proof, attachmentProof: nil)
+            } else if let attachmentDraft {
+                var proof = try db.exactReplyAttachmentCorrespondence(scan: scan,
+                                                                      target: target,
+                                                                      expectedAttachmentSHA256: attachmentDraft.copySHA256,
+                                                                      expectedAttachmentSize: attachmentDraft.copySize,
+                                                                      checkpoint: {
+                                                                          guard !context.isCancelled else { throw WorkerProtocolError.cancelled }
+                                                                          guard !context.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
+                                                                      })
+                var relationship = ReplyProofRelationship.requestedTarget
+                if expected.relationshipDigest != nil, proof.reason == "matching-row-wrong-parent" {
+                    proof = try db.exactReplyThreadRootAttachmentCorrespondence(scan: scan,
+                                                                               target: target,
+                                                                               expectedAttachmentSHA256: attachmentDraft.copySHA256,
+                                                                               expectedAttachmentSize: attachmentDraft.copySize,
+                                                                               checkpoint: {
+                                                                                   guard !context.isCancelled else { throw WorkerProtocolError.cancelled }
+                                                                                   guard !context.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
+                                                                               })
+                    relationship = .threadRoot
+                }
+                proofResult = PolledReplyProof(relationship: relationship, status: proof.status, textProof: nil, attachmentProof: proof)
+            } else { throw WorkerProtocolError.malformedFrame }
+            if proofResult.status == "verified", try !proofResult.hasUniqueDestination(in: db, chatRowid: target.chat_rowid) {
+                return PolledReplyProof(relationship: proofResult.relationship, status: "uncertain", textProof: nil, attachmentProof: nil)
+            }
+            return proofResult
         }
-        let target = expected.target
-        let scan = try db.exactReplyRows(chatRowid: target.chat_rowid, afterHighwater: highwater)
-        if let expectedText = input.text {
-            var proof = try ChatDB.judgeExactReplyCorrespondence(scan: scan, target: target, expectedText: expectedText)
-            var relationship = ReplyProofRelationship.requestedTarget
-            if expected.relationshipDigest != nil, proof.reason == "matching-row-wrong-parent" {
-                proof = try ChatDB.judgeExactReplyThreadRootCorrespondence(scan: scan, target: target, expectedText: expectedText)
-                relationship = .threadRoot
-            }
-            last = PolledReplyProof(relationship: relationship, status: proof.status, textProof: proof, attachmentProof: nil)
-        } else if let attachmentDraft {
-            var proof = try db.exactReplyAttachmentCorrespondence(scan: scan,
-                                                                  target: target,
-                                                                  expectedAttachmentSHA256: attachmentDraft.copySHA256,
-                                                                  expectedAttachmentSize: attachmentDraft.copySize,
-                                                                  checkpoint: {
-                                                                      guard !context.isCancelled else { throw WorkerProtocolError.cancelled }
-                                                                      guard !context.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
-                                                                  })
-            var relationship = ReplyProofRelationship.requestedTarget
-            if expected.relationshipDigest != nil, proof.reason == "matching-row-wrong-parent" {
-                proof = try db.exactReplyThreadRootAttachmentCorrespondence(scan: scan,
-                                                                           target: target,
-                                                                           expectedAttachmentSHA256: attachmentDraft.copySHA256,
-                                                                           expectedAttachmentSize: attachmentDraft.copySize,
-                                                                           checkpoint: {
-                                                                               guard !context.isCancelled else { throw WorkerProtocolError.cancelled }
-                                                                               guard !context.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
-                                                                           })
-                relationship = .threadRoot
-            }
-            last = PolledReplyProof(relationship: relationship, status: proof.status, textProof: nil, attachmentProof: proof)
-        } else { throw WorkerProtocolError.malformedFrame }
         if last.status != "waiting" { return last }
-        guard attempt < 20 else { return last }
+        guard attempt < additionalPolls else { return last }
         let remaining = context.deadline.remainingNanoseconds
         if remaining == 0 { throw WorkerProtocolError.deadlineExpired }
         Thread.sleep(forTimeInterval: Double(min(250_000_000, remaining)) / 1_000_000_000)
@@ -639,7 +710,8 @@ private func outputTarget(_ resolved: ReplyResolvedTarget) -> ReplyTargetOutput 
                       message_rowid: resolved.target.message_rowid,
                       message_guid: resolved.target.message_guid,
                       native_part: resolved.target.native_part,
-                      participant_handle: resolved.target.participant_handle,
+                      participant_handle: resolved.target.isGroup ? nil : resolved.participants.first,
+                      participant_count: resolved.target.isGroup ? resolved.participants.count : nil,
                       root_is_from_me: resolved.target.root_is_from_me,
                       is_from_me: resolved.target.is_from_me,
                       thread_root: replyThreadRootOutput(resolved.target))

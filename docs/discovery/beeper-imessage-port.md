@@ -418,7 +418,15 @@ support or live reliability.
    stripping or treat UI action completion as success.
 4. Text and attachment replies require exact quoted message/part identity and verify
    the persisted reply relationship through the same observed-state contract.
-   Preserve existing attachment path controls.
+   Preserve existing attachment path controls. On macOS 27.2, the native inline
+   reply controller used the supplied message part for an ordinary bubble. With
+   a reply-context preview it searched forward in the transcript for a reply
+   row. Reordering two synthetic replies changed the row it chose. Group send
+   qualification must establish which part the reply composer actually opened
+   and which conversation receives the send. On this host the native controller
+   forwarded the thread identifier to the conversation supplied at send time.
+   The originator’s reply count increased even when a left or read-only group
+   stopped the send before transport. A count increase cannot verify delivery.
 5. Rich reads expose supported reply relationships, authors, edits, delivery/error/
    read metadata, unsend markers, mentions and stickers. Missing/unsupported fields
    remain distinguishable; sticker reaction writes are unsupported.

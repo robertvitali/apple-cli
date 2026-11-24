@@ -26,7 +26,7 @@ protocol MessagesClipboardBackend: AnyObject {
     func readItems(deadline: WorkerDeadline) throws -> [[MessagesClipboardRepresentation]]
     func clearContents(deadline: WorkerDeadline) throws -> Int
     func publishFileURLData(_ data: Data, deadline: WorkerDeadline) throws -> Bool
-    func writeItems(_ items: [[MessagesClipboardRepresentation]], deadline: WorkerDeadline) throws -> Bool
+    func writeItems(_ items: [[MessagesClipboardRepresentation]], ownerCount: Int, deadline: WorkerDeadline) throws -> Bool
 }
 
 protocol MessagesClipboarding: AnyObject {
@@ -48,8 +48,9 @@ extension MessagesClipboarding {
         return MessagesClipboardSnapshot(changeCount: secondCount, items: secondItems)
     }
 
-    func clearContentsReturningCount(deadline: WorkerDeadline) throws -> Int {
+    func clearContentsReturningCount(expectedCount: Int, deadline: WorkerDeadline) throws -> Int {
         try checkMessagesAXDeadline(deadline)
+        try requireChangeCount(expectedCount)
         return try backend.clearContents(deadline: deadline)
     }
 
@@ -58,14 +59,19 @@ extension MessagesClipboarding {
         guard empty.changeCount == ownerCount, empty.isEmptyAtCount else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
     }
 
+    private func requireChangeCount(_ expected: Int) throws {
+        guard backend.changeCount == expected else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
+    }
+
     func clearAndVerifyEmpty(deadline: WorkerDeadline) throws -> Int {
-        let count = try clearContentsReturningCount(deadline: deadline)
+        let count = try clearContentsReturningCount(expectedCount: backend.changeCount, deadline: deadline)
         try verifyEmpty(ownerCount: count, deadline: deadline)
         return count
     }
 
     func publishAndVerifyFileURL(_ url: URL, ownerCount: Int, deadline: WorkerDeadline) throws -> Int {
         try checkMessagesAXDeadline(deadline)
+        try requireChangeCount(ownerCount)
         guard try backend.publishFileURLData(Data(url.absoluteString.utf8), deadline: deadline) else {
             throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift
         }
@@ -83,15 +89,15 @@ extension MessagesClipboarding {
         }
     }
 
-    func restore(_ snapshot: MessagesClipboardSnapshot, deadline: WorkerDeadline) throws {
+    func restore(_ snapshot: MessagesClipboardSnapshot, ownerCount: Int, deadline: WorkerDeadline) throws {
         try checkMessagesAXDeadline(deadline)
-        let restoreCount = try backend.clearContents(deadline: deadline)
+        let restoreCount = try clearContentsReturningCount(expectedCount: ownerCount, deadline: deadline)
         let empty = try self.snapshot(deadline: deadline)
         guard empty.changeCount == restoreCount, empty.isEmptyAtCount else {
             throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift
         }
         if !snapshot.items.isEmpty {
-            guard try backend.writeItems(snapshot.items, deadline: deadline) else {
+            guard try backend.writeItems(snapshot.items, ownerCount: restoreCount, deadline: deadline) else {
                 throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift
             }
         }
@@ -164,7 +170,7 @@ final class LiveMessagesClipboardBackend: MessagesClipboardBackend {
         return pasteboard.setData(data, forType: .fileURL)
     }
 
-    func writeItems(_ items: [[MessagesClipboardRepresentation]], deadline: WorkerDeadline) throws -> Bool {
+    func writeItems(_ items: [[MessagesClipboardRepresentation]], ownerCount: Int, deadline: WorkerDeadline) throws -> Bool {
         try checkMessagesAXDeadline(deadline)
         var restoredItems: [NSPasteboardItem] = []
         for item in items {
@@ -176,6 +182,8 @@ final class LiveMessagesClipboardBackend: MessagesClipboardBackend {
             }
             restoredItems.append(pasteboardItem)
         }
+        try checkMessagesAXDeadline(deadline)
+        guard pasteboard.changeCount == ownerCount else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
         return pasteboard.writeObjects(restoredItems)
     }
 }

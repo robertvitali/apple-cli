@@ -84,6 +84,13 @@ public final class SQLiteReadTransaction {
     }
     private var tableColumnAuthorization: TableColumnAuthorization?
 
+    package enum SchemaRead: String {
+        case tableList = "table_list", columns = "table_xinfo", ordinaryColumns = "table_info", indexes = "index_list"
+    }
+
+    private var schemaRead: (kind: SchemaRead, table: String)?
+    private var permitMinMax = false
+
     init(limits: Limits, isCancelled: @escaping () -> Bool) throws {
         guard limits.timeout.isFinite, limits.timeout > 0, limits.timeout <= 60,
               (1...1_000_000).contains(limits.rows),
@@ -172,6 +179,9 @@ public final class SQLiteReadTransaction {
                    scope.tableColumnAuthorization == nil { return SQLITE_DENY }
                 return SQLITE_OK
             case SQLITE_PRAGMA:
+                if let read = scope.schemaRead, let name, let argument, let schema,
+                   String(cString: name) == read.kind.rawValue, String(cString: argument) == read.table,
+                   String(cString: schema) == "main" { return SQLITE_OK }
                 guard let permission = scope.tableColumnAuthorization,
                       let name, let argument, let schema,
                       String(cString: name) == "table_xinfo",
@@ -184,7 +194,9 @@ public final class SQLiteReadTransaction {
                 if scope.allowsUnlikelyHint && source == nil && sqlite3_stricmp(argument, "unlikely") == 0 {
                     return SQLITE_OK
                 }
-                return SQLiteReadTransaction.allowedFunctions.contains(String(cString: argument).lowercased())
+                let function = String(cString: argument).lowercased()
+                if scope.permitMinMax && (function == "min" || function == "max") { return SQLITE_OK }
+                return SQLiteReadTransaction.allowedFunctions.contains(function)
                     ? SQLITE_OK : SQLITE_DENY
             default: return SQLITE_DENY
             }
@@ -325,6 +337,30 @@ public final class SQLiteReadTransaction {
         _ consume: (SQLiteReader.Row) throws -> Void
     ) throws {
         try withReading { db in try readRows(sql, binds, on: db, consume) }
+    }
+
+    /// Fixed main-schema introspection shares the observation's row, value and time budgets.
+    package func schemaRows(_ kind: SchemaRead, table: String) throws -> [SQLiteReader.Row] {
+        var rows: [SQLiteReader.Row] = []
+        try withReading { db in
+            guard (1...128).contains(table.utf8.count),
+                  table.utf8.allSatisfy({ (97...122).contains($0) || $0 == 95 }) else { throw Failure.invalidQuery }
+            schemaRead = (kind, table)
+            defer { schemaRead = nil }
+            try readRows("PRAGMA main.\(kind.rawValue)(\(table))", [], on: db) { rows.append($0) }
+        }
+        return rows
+    }
+
+    /// In addition to the standard read functions, observation queries may compute MIN and MAX.
+    package func observationRows(_ sql: String, _ binds: [String]) throws -> [SQLiteReader.Row] {
+        var rows: [SQLiteReader.Row] = []
+        try withReading { db in
+            permitMinMax = true
+            defer { permitMinMax = false }
+            try readRows(sql, binds, on: db) { rows.append($0) }
+        }
+        return rows
     }
 
     /// Read main-schema columns in schema order within this capture's pinned snapshot.

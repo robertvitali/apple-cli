@@ -552,7 +552,7 @@ package enum MessagesReplyComposerProbeParent {
         guard message.is_from_me == request.expectedIsFromMe else {
             throw MessagesReplyComposerParentError.targetDrift
         }
-        guard let body = message.body, body.hasPrefix("apple-cli-test"), body.hasPrefix(request.requiredBodyPrefix) else {
+        guard let body = message.body, message.hasReplyTargetLabel(request.requiredBodyPrefix) else {
             throw MessagesReplyComposerParentError.fixtureUnlabeled
         }
         guard body.utf8.count == request.expectedBodyUTF8Length,

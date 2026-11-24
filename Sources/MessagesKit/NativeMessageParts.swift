@@ -67,6 +67,10 @@ public enum NativeMessageParts {
         public let nativeParts: [NativePart]?
         public let mentions: MentionObservation?
 
+        func hasLabel(_ prefix: String, displayed: String?) -> Bool {
+            displayed?.utf8.starts(with: prefix.utf8) == true && text?.utf8.starts(with: prefix.utf8) == true
+        }
+
         /// Uses the strict decoded archive, independent of the displayed message text.
         func uniqueActionPart(requested: Int?) -> NativePart? {
             guard nativePartsAvailable, let parts = nativeParts, let text else { return nil }

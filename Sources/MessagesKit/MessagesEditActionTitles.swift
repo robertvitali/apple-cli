@@ -30,8 +30,7 @@ struct MessagesEditActionTitles {
 
     static func live(deadline: WorkerDeadline) throws -> Self {
         try resolve(deadline: deadline) { key in
-            Bundle(path: "/System/iOSSupport/System/Library/AccessibilityBundles/ChatKitFramework.axbundle")?
-                .localizedString(forKey: key, value: nil, table: "Accessibility")
+            MessagesLocalizedResource.accessibility.string(forKey: key)
         }
     }
 }

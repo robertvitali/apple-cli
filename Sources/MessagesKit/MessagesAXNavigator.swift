@@ -162,9 +162,14 @@ struct MessagesAXNavigator {
     // Recognize only its observed, inert structure; other dialogs and unknown
     // attributes remain ambiguous. Never act on the sharing control itself.
     func conversationWindows(process: MessagesAXProcess, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        try conversationWindowSnapshot(process: process, deadline: deadline).conversation
+    }
+
+    func conversationWindowSnapshot(process: MessagesAXProcess, deadline: WorkerDeadline) throws
+        -> (direct: [any MessagesAXElement], conversation: [any MessagesAXElement]) {
         try checkProcess(process, deadline: deadline)
         let windows = try process.root.directWindows(limit: maxChildren, deadline: deadline)
-        guard windows.count > 1 else { return windows }
+        guard windows.count > 1 else { return (windows, windows) }
         let first = try sharingWindowSnapshot(windows, process: process, deadline: deadline)
         let current = try process.root.directWindows(limit: maxChildren, deadline: deadline)
         let second = try sharingWindowSnapshot(current, process: process, deadline: deadline)
@@ -175,7 +180,7 @@ struct MessagesAXNavigator {
             throw MessagesAXRouteDrift(.windowMismatch)
         }
         try checkProcess(process, deadline: deadline)
-        return [first.scene]
+        return (current, [second.scene])
     }
 
     private func sharingWindowSnapshot(_ windows: [any MessagesAXElement], process: MessagesAXProcess,

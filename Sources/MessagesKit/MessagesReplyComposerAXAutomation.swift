@@ -84,64 +84,44 @@ private struct ReplyAttachmentOwnershipFailure: Error {
 }
 
 protocol MessagesReplyComposerAXDriving: MessagesAXProcessDriving {
+    func openMessages(url: URL, deadline: WorkerDeadline,
+                      inspectExisting: (MessagesAXProcess) throws -> [any MessagesAXElement]) throws -> MessagesAXProcess
     func replyActionTitles(deadline: WorkerDeadline) throws -> [String]
     func normalComposePlaceholders(deadline: WorkerDeadline) throws -> [String]
     func replyTranscriptDescription(deadline: WorkerDeadline) throws -> String?
     func focusedElement(in process: MessagesAXProcess, deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
 }
 
-struct MessagesAXActionMatcher {
-    static func matches(_ action: String, title: String) -> Bool {
-        let prefix = Array("Name:\(title)".utf8)
-        let bytes = Array(action.utf8)
-        guard bytes.starts(with: prefix) else { return false }
-        let suffix = Array(bytes.dropFirst(prefix.count))
-        if suffix.isEmpty || suffix.first == 10 { return true }
-        let ellipsis = Array("…".utf8)
-        guard suffix.starts(with: ellipsis) else { return false }
-        let afterEllipsis = suffix.dropFirst(ellipsis.count)
-        return afterEllipsis.isEmpty || afterEllipsis.first == 10
-    }
-}
-
 struct MessagesChatKitLocalizedStrings {
-    var replyTitle: (WorkerDeadline) throws -> String?
+    var replyTitle: (String) -> String?
     var replyTranscriptDescription: (WorkerDeadline) throws -> String?
     var normalComposePlaceholders: (WorkerDeadline) throws -> [String]
 
-    init(replyTitle: @escaping (WorkerDeadline) throws -> String?,
-                 replyTranscriptDescription: @escaping (WorkerDeadline) throws -> String?,
-                 normalComposePlaceholders: @escaping (WorkerDeadline) throws -> [String]) {
-        self.replyTitle = replyTitle
-        self.replyTranscriptDescription = replyTranscriptDescription
-        self.normalComposePlaceholders = normalComposePlaceholders
-    }
-
     static func live() -> Self {
         Self(
-            replyTitle: { deadline in
-                try checkMessagesAXDeadline(deadline)
-                return localizedString(bundlePath: "/System/iOSSupport/System/Library/AccessibilityBundles/ChatKitFramework.axbundle",
-                                       key: "balloon.message.reply", table: "Accessibility")
+            replyTitle: { key in
+                MessagesLocalizedResource.accessibility.string(forKey: key)
             },
             replyTranscriptDescription: { deadline in
                 try checkMessagesAXDeadline(deadline)
-                return localizedString(bundlePath: "/System/iOSSupport/System/Library/AccessibilityBundles/ChatKitFramework.axbundle",
-                                       key: "group.reply.collection", table: "Accessibility")
+                return MessagesLocalizedResource.accessibility.string(forKey: "group.reply.collection")
             },
             normalComposePlaceholders: { deadline in
                 try checkMessagesAXDeadline(deadline)
                 return [
-                    localizedString(bundlePath: "/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework",
-                                    key: "MADRID", table: "ChatKit"),
-                    localizedString(bundlePath: "/System/iOSSupport/System/Library/PrivateFrameworks/ChatKit.framework",
-                                    key: "TEXT_MESSAGE", table: "ChatKit")
+                    MessagesLocalizedResource.chatKit.string(forKey: "MADRID"),
+                    MessagesLocalizedResource.chatKit.string(forKey: "TEXT_MESSAGE")
                 ].compactMap { $0 }
             })
     }
 
     func resolveReplyTitles(deadline: WorkerDeadline) throws -> [String] {
-        try canonicalize([try replyTitle(deadline)].compactMap { $0 })
+        try checkMessagesAXDeadline(deadline)
+        let base = replyTitle("balloon.message.reply")
+        let mac = replyTitle("balloon.message.reply.macOS")
+        // Older resource bundles expose only the base title.
+        let full = mac ?? base.map { $0 + "…" }
+        return try canonicalize([base, full].compactMap { $0 })
     }
 
     func resolveNormalPlaceholders(deadline: WorkerDeadline) throws -> [String] {
@@ -170,12 +150,6 @@ struct MessagesChatKitLocalizedStrings {
         }
     }
 
-    private static func localizedString(bundlePath: String, key: String, table: String) -> String? {
-        guard let bundle = Bundle(path: bundlePath) else { return nil }
-        let value = bundle.localizedString(forKey: key, value: nil, table: table)
-        guard value != key, !value.isEmpty else { return nil }
-        return value
-    }
 }
 
 final class LiveMessagesReplyComposerAXDriver: MessagesReplyComposerAXDriving {
@@ -200,6 +174,10 @@ final class LiveMessagesReplyComposerAXDriver: MessagesReplyComposerAXDriving {
 
     func checkAccessibilityTrusted(prompt: Bool) -> Bool { base.checkAccessibilityTrusted(prompt: prompt) }
     func openMessages(url: URL, deadline: WorkerDeadline) throws -> MessagesAXProcess { try base.openMessages(url: url, deadline: deadline) }
+    func openMessages(url: URL, deadline: WorkerDeadline,
+                      inspectExisting: (MessagesAXProcess) throws -> [any MessagesAXElement]) throws -> MessagesAXProcess {
+        try base.openMessages(url: url, deadline: deadline, inspectExisting: inspectExisting)
+    }
     func canonicalMessagesProcess(deadline: WorkerDeadline) throws -> MessagesAXProcess { try base.canonicalMessagesProcess(deadline: deadline) }
     func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool { try base.messagesProcessIsFrontmost(process, deadline: deadline) }
     func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { try base.focusedElement(deadline: deadline) }
@@ -454,14 +432,11 @@ struct MessagesReplyComposerAXAutomation {
             guard !titles.isEmpty else { throw MessagesReplyComposerAXError.unknownAXValue }
             let normalPlaceholders = try driver.normalComposePlaceholders(deadline: deadline)
             let replyDescription = try driver.replyTranscriptDescription(deadline: deadline)
-            try refuseUnsafeExistingStateBeforeOpen(normalPlaceholders: normalPlaceholders,
-                                                    replyDescription: replyDescription,
-                                                    deadline: deadline)
             let targetURL = try NativeMessagesURL.message(messageGUID: request.messageGUID,
                                                           nativePartIndex: request.nativePartIndex,
                                                           nativePartGUID: request.nativePartGUID)
-            stage = .open
-            let process = try driver.openMessages(url: targetURL, deadline: deadline)
+            let process = try openForReply(url: targetURL, normalPlaceholders: normalPlaceholders,
+                                           replyDescription: replyDescription, stage: &stage, deadline: deadline)
             stage = .postOpenSafety
             try refuseUnsafeExistingState(process: process, normalPlaceholders: normalPlaceholders,
                                           replyDescription: replyDescription, deadline: deadline)
@@ -563,12 +538,11 @@ struct MessagesReplyComposerAXAutomation {
             guard !titles.isEmpty else { throw MessagesReplyComposerAXError.unknownAXValue }
             let normalPlaceholders = try driver.normalComposePlaceholders(deadline: deadline)
             let replyDescription = try driver.replyTranscriptDescription(deadline: deadline)
-            try refuseUnsafeExistingStateBeforeOpen(normalPlaceholders: normalPlaceholders, replyDescription: replyDescription, deadline: deadline)
             let targetURL = try NativeMessagesURL.message(messageGUID: request.messageGUID,
                                                           nativePartIndex: request.nativePartIndex,
                                                           nativePartGUID: request.nativePartGUID)
-            stage = .open
-            let process = try driver.openMessages(url: targetURL, deadline: deadline)
+            let process = try openForReply(url: targetURL, normalPlaceholders: normalPlaceholders,
+                                           replyDescription: replyDescription, stage: &stage, deadline: deadline)
             stage = .postOpenSafety
             try refuseUnsafeExistingState(process: process, normalPlaceholders: normalPlaceholders,
                                           replyDescription: replyDescription, deadline: deadline)
@@ -604,7 +578,7 @@ struct MessagesReplyComposerAXAutomation {
             let layoutBefore = try pasteKeyResolver.resolvePasteKey(deadline: deadline)
             let originalSnapshot = try clipboard.snapshot(deadline: deadline)
             originalClipboard = originalSnapshot
-            let cleared = try clipboard.clearContentsReturningCount(deadline: deadline)
+            let cleared = try clipboard.clearContentsReturningCount(expectedCount: originalSnapshot.changeCount, deadline: deadline)
             clipboardOwnerCount = cleared
             try clipboard.verifyEmpty(ownerCount: cleared, deadline: deadline)
             publishedURL = copyURL
@@ -687,7 +661,7 @@ struct MessagesReplyComposerAXAutomation {
         let current = try clipboard.snapshot(deadline: deadline)
         let ownedState = current.changeCount == ownerCount && (current.isEmptyAtCount || url.map { current.isExactFileURLPayload($0) } == true)
         guard ownedState else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
-        try clipboard.restore(original, deadline: deadline)
+        try clipboard.restore(original, ownerCount: ownerCount, deadline: deadline)
     }
 
     private func validateExactAttachmentDraft(in body: any MessagesAXElement, route: MessagesAXRoute,
@@ -744,12 +718,11 @@ struct MessagesReplyComposerAXAutomation {
             let normalPlaceholders = try driver.normalComposePlaceholders(deadline: deadline)
             let replyDescription = try driver.replyTranscriptDescription(deadline: deadline)
             try validateTarget()
-            try refuseUnsafeExistingStateBeforeOpen(normalPlaceholders: normalPlaceholders, replyDescription: replyDescription, deadline: deadline)
             let targetURL = try NativeMessagesURL.message(messageGUID: request.messageGUID,
                                                           nativePartIndex: request.nativePartIndex,
                                                           nativePartGUID: request.nativePartGUID)
-            stage = .open
-            let process = try driver.openMessages(url: targetURL, deadline: deadline)
+            let process = try openForReply(url: targetURL, normalPlaceholders: normalPlaceholders,
+                                           replyDescription: replyDescription, stage: &stage, deadline: deadline)
             stage = .postOpenSafety
             try refuseUnsafeExistingState(process: process, normalPlaceholders: normalPlaceholders,
                                           replyDescription: replyDescription, deadline: deadline)
@@ -875,8 +848,9 @@ struct MessagesReplyComposerAXAutomation {
             let layoutBefore = try pasteKeyResolver.resolvePasteKey(deadline: deadline)
             let clipboard = clipboardFactory()
             activeClipboard = clipboard
-            originalClipboard = try clipboard.snapshot(deadline: deadline)
-            let cleared = try clipboard.clearContentsReturningCount(deadline: deadline)
+            let originalSnapshot = try clipboard.snapshot(deadline: deadline)
+            originalClipboard = originalSnapshot
+            let cleared = try clipboard.clearContentsReturningCount(expectedCount: originalSnapshot.changeCount, deadline: deadline)
             clipboardOwnerCount = cleared
             try clipboard.verifyEmpty(ownerCount: cleared, deadline: deadline)
             publishedURL = copyURL
@@ -1003,22 +977,33 @@ struct MessagesReplyComposerAXAutomation {
         let evidence: MessagesAXBodyValueEvidence
     }
 
-    private func refuseUnsafeExistingStateBeforeOpen(normalPlaceholders: [String], replyDescription: String?, deadline: WorkerDeadline) throws {
-        guard let process = try? driver.canonicalMessagesProcess(deadline: deadline) else { return }
-        try refuseUnsafeExistingState(process: process, normalPlaceholders: normalPlaceholders,
-                                      replyDescription: replyDescription, deadline: deadline)
+    private func openForReply(url: URL, normalPlaceholders: [String], replyDescription: String?,
+                              stage: inout MessagesReplyComposerAXStage, deadline: WorkerDeadline) throws -> MessagesAXProcess {
+        stage = .open
+        return try driver.openMessages(url: url, deadline: deadline) { process in
+            stage = .preflight
+            let windows = try refuseUnsafeExistingState(process: process, normalPlaceholders: normalPlaceholders,
+                                                        replyDescription: replyDescription, deadline: deadline)
+            stage = .open
+            return windows
+        }
     }
 
-    private func refuseUnsafeExistingState(process: MessagesAXProcess, normalPlaceholders: [String], replyDescription: String?, deadline: WorkerDeadline) throws {
-        let windows: [any MessagesAXElement]
+    @discardableResult
+    private func refuseUnsafeExistingState(process: MessagesAXProcess, normalPlaceholders: [String],
+                                          replyDescription: String?, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        let snapshot: (direct: [any MessagesAXElement], conversation: [any MessagesAXElement])
         do {
-            windows = try navigator.conversationWindows(process: process, deadline: deadline)
+            snapshot = try navigator.conversationWindowSnapshot(process: process, deadline: deadline)
         } catch is MessagesAXRouteDrift {
             throw MessagesReplyComposerAXError.replyComposerAmbiguous
         }
-        guard windows.count <= 1 else { throw MessagesReplyComposerAXError.replyComposerAmbiguous }
-        for window in windows {
-            guard try window.role(deadline: deadline) == "AXWindow" else { throw MessagesReplyComposerAXError.replyComposerAmbiguous }
+        for window in snapshot.conversation {
+            guard try window.role(deadline: deadline) == "AXWindow",
+                  try window.processIdentifier(deadline: deadline) == process.identity.pid,
+                  let parent = try window.parent(deadline: deadline), parent.sameIdentity(as: process.root) else {
+                throw MessagesReplyComposerAXError.replyComposerAmbiguous
+            }
             if try replyComposer(in: window, replyDescription: replyDescription, deadline: deadline) != nil {
                 throw MessagesReplyComposerAXError.replyComposerExisting
             }
@@ -1027,6 +1012,7 @@ struct MessagesReplyComposerAXAutomation {
                 throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
             }
         }
+        return snapshot.direct
     }
 
     private func refuseUnsafeNormalComposerState(in window: any MessagesAXElement, normalPlaceholders: [String], deadline: WorkerDeadline) throws {
@@ -1038,7 +1024,7 @@ struct MessagesReplyComposerAXAutomation {
 
     private func replyAction(on element: any MessagesAXElement, titles: [String], deadline: WorkerDeadline) throws -> String? {
         let matches = try element.actions(deadline: deadline).filter { action in
-            titles.contains { MessagesAXActionMatcher.matches(action, title: $0) }
+            titles.contains { MessagesReactionAXAutomation.matchesAction(action, title: $0) }
         }
         guard matches.count <= 1 else { throw MessagesReplyComposerAXError.unknownAXValue }
         return matches.first

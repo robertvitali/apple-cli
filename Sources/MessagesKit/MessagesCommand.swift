@@ -51,6 +51,7 @@ struct MessagesReplyCleanStateToken: @unchecked Sendable {
 struct MessagesCommandDependencies: Sendable {
     var loadAddressBook: @Sendable () -> AddressBook
     var makeChatDB: @Sendable (AddressBook) throws -> ChatDB
+    var replyDatabaseLocation: @Sendable (AddressBook) throws -> ReplyDatabaseLocation
     /// One send, whole: body and every attachment in a single osascript run. The argument is a
     /// `Send.Request` rather than five positionals because handle/message and groupChat/service
     /// are otherwise adjacent same-typed parameters on the one surface that reaches a real human.
@@ -75,6 +76,7 @@ struct MessagesCommandDependencies: Sendable {
     static let live = MessagesCommandDependencies(
         loadAddressBook: AddressBook.load,
         makeChatDB: { try ChatDB(book: $0) },
+        replyDatabaseLocation: { _ in ReplyDatabaseLocation(path: ChatDB.defaultPath(), home: FileManager.default.homeDirectoryForCurrentUser.path) },
         performSend: Send.perform,
         dbDiagnostic: { ChatDB.diagnose() },
         addressBookDiagnostic: AddressBook.diagnose,

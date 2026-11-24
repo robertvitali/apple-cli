@@ -892,18 +892,42 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(driver.message.performed.isEmpty)
     }
 
-    @Test func replyActionMatcherAcceptsOnlyExactLocalizedEllipsisBoundary() {
-        let title = "Répondre"
-        #expect(MessagesAXActionMatcher.matches("Name:Répondre", title: title))
-        #expect(MessagesAXActionMatcher.matches("Name:Répondre\nTarget:0x0", title: title))
-        #expect(MessagesAXActionMatcher.matches("Name:Répondre…", title: title))
-        #expect(MessagesAXActionMatcher.matches("Name:Répondre…\nTarget:0x0", title: title))
+    @Test func replyActionMatcherAcceptsOnlyExactLocalizedEllipsisBoundary() throws {
+        var strings = MessagesChatKitLocalizedStrings.live()
+        strings.replyTitle = { $0 == "balloon.message.reply" ? "Répondre" : nil }
+        let titles = try strings.resolveReplyTitles(deadline: .millisecondsFromNow(5_000))
+        func matches(_ name: String) -> Bool {
+            titles.contains { MessagesReactionAXAutomation.matchesAction(name, title: $0) }
+        }
+        #expect(matches("Name:Répondre"))
+        #expect(matches("Name:Répondre\nTarget:0x0"))
+        #expect(matches("Name:Répondre…"))
+        #expect(matches("Name:Répondre…\nTarget:0x0"))
 
-        #expect(!MessagesAXActionMatcher.matches("Name:Répondre...", title: title))
-        #expect(!MessagesAXActionMatcher.matches("Name:Répondre……", title: title))
-        #expect(!MessagesAXActionMatcher.matches("Name:Répondre… details", title: title))
-        #expect(!MessagesAXActionMatcher.matches("Name:Répondre later", title: title))
-        #expect(!MessagesAXActionMatcher.matches("Name:Répondre.\nTarget:0x0", title: title))
+        #expect(!matches("Name:Répondre..."))
+        #expect(!matches("Name:Répondre……"))
+        #expect(!matches("Name:Répondre… details"))
+        #expect(!matches("Name:Répondre later"))
+        #expect(!matches("Name:Répondre.\nTarget:0x0"))
+    }
+
+    @Test(arguments: [["Odpovědět", "Odpověď…"], ["Antworten", "Antworten …"], ["回覆", "回覆⋯"], ["תגובה", "תשובה…"]])
+    func replyUsesInstalledMacTitleThroughComposerInspection(_ pair: [String]) throws {
+        let driver = FakeReplyDriver()
+        var strings = MessagesChatKitLocalizedStrings.live()
+        strings.replyTitle = { ["balloon.message.reply": pair[0], "balloon.message.reply.macOS": pair[1]][$0] }
+        driver.replyTitles = try strings.resolveReplyTitles(deadline: .millisecondsFromNow(5_000))
+        let action = "Name:\(pair[1])\nTarget:0x0\nSelector:(null)"
+        driver.message.actionNames = ["Name:\(pair[0])…", action, "Name:\(pair[1])…", "Name:\(pair[1]) details"]
+        driver.message.onAction = { [weak driver] name in
+            guard name == action else { throw MessagesReplyComposerAXError.replyActionUnavailable }
+            driver?.replyVisible = true
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in })
+            .inspect(request(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplyComposerProbeDetail.verified))
+        #expect(driver.message.performed == [action])
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
     }
 
     @Test func preexistingReplySurfaceIsRefusedBeforeAction() throws {
@@ -1161,6 +1185,42 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(driver.replyTranscript.performed.isEmpty)
     }
 
+    @Test func unresolvedRunningApplicationBlocksReplyInspectionAndSend() throws {
+        let driver = FakeReplyDriver()
+        driver.lookupFailure = .targetDrift
+        let automation = MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in })
+        #expect(try automation.inspect(request(), deadline: .millisecondsFromNow(5_000)) == .refused("target-drift-open"))
+        #expect(try automation.send(sendRequest(), deadline: .millisecondsFromNow(5_000), validateTarget: {}) == .refused("target-drift-open"))
+        #expect(driver.openCount == 0)
+        #expect(driver.message.performed.isEmpty)
+    }
+
+    @Test(arguments: ["appeared", "replaced", "gone", "foreign-pid", "foreign-parent"])
+    func preopenWindowChangeRefusesNavigation(_ change: String) throws {
+        let driver = FakeReplyDriver()
+        let replacement = FakeReplyNode(roleValue: "AXWindow")
+        if change == "appeared" {
+            var reads = 0
+            driver.root.dynamicChildren = {
+                reads += 1
+                return reads == 1 ? [] : [replacement]
+            }
+        } else if change == "foreign-pid" {
+            driver.window.processIdentifierValue = 456
+        } else if change == "foreign-parent" {
+            driver.window.parentOverride = { replacement }
+        } else {
+            driver.normalBody.onBodyEvidenceRead = {
+                driver.root.dynamicChildren = { change == "replaced" ? [replacement] : [] }
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in })
+            .inspect(request(), deadline: .millisecondsFromNow(5_000))
+        let detail = change.hasPrefix("foreign-") ? "reply-composer-ambiguous" : "target-drift-open"
+        #expect(outcome == .refused(detail))
+        #expect(driver.openCount == 0)
+    }
+
     @Test func preopenDraftStateRefusesBeforeNativeOpen() throws {
         let driver = FakeReplyDriver()
         driver.normalBody.bodyEvidence = .init(valueKind: .string(5), characterCount: 5, placeholder: "iMessage")
@@ -1328,7 +1388,7 @@ struct MessagesReplyComposerAXAutomationTests {
         let extraBody = FakeReplyNode(roleValue: "AXTextField", identifierValue: "messageBodyField", enabledValue: true, focusedValue: true, settableValue: true)
         extraBody.bodyEvidence = .init(valueKind: .noValue, characterCount: 0, placeholder: "Reply")
         driver.message.onAction = { [weak driver] name in
-            guard MessagesAXActionMatcher.matches(name, title: "Reply") else { throw MessagesReplyComposerAXError.replyActionUnavailable }
+            guard MessagesReactionAXAutomation.matchesAction(name, title: "Reply") else { throw MessagesReplyComposerAXError.replyActionUnavailable }
             driver?.replyVisible = true
             driver?.extraWindowChildren = [extraBody]
         }
@@ -1342,7 +1402,7 @@ struct MessagesReplyComposerAXAutomationTests {
     @Test func replyComposerRefusesZeroWindowWideBodiesBeforeCancel() throws {
         let driver = FakeReplyDriver()
         driver.message.onAction = { [weak driver] name in
-            guard MessagesAXActionMatcher.matches(name, title: "Reply") else { throw MessagesReplyComposerAXError.replyActionUnavailable }
+            guard MessagesReactionAXAutomation.matchesAction(name, title: "Reply") else { throw MessagesReplyComposerAXError.replyActionUnavailable }
             guard let driver else { return }
             driver.replyVisible = true
             driver.replyWindowChildrenOverride = { [weak driver] in driver.map { [$0.replyTranscript] } ?? [] }
@@ -1459,6 +1519,26 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(throws: Error.self) {
             _ = try MessagesReplyComposerProbeParent.payloadData(fromFile: file.path, repoRoot: FileManager.default.currentDirectoryPath)
         }
+    }
+
+    @Test func composerProbeRejectsUnlabeledNativeTargetBeforeInspectingUI() throws {
+        let fx = try dbFixture()
+        let ordinary = "ordinary target"
+        let archive = replyNativeArchive(ordinary, [
+            (replyNativePartKey, NSNumber(value: 2), replyRange(ordinary, "target")),
+        ])
+        let hex = archive.map { String(format: "%02x", $0) }.joined()
+        try fx.exec("UPDATE message SET attributedBody=X'\(hex)' WHERE ROWID=70")
+        let path = fx.path, home = fx.homePath
+        let driver = FakeReplyDriver()
+        let action = try MessagesReplyComposerProbeParent.observedAction(
+            stateRoot: try scratch.directory().path, payloadData: try request().workerPayloadData(),
+            deadline: .millisecondsFromNow(5_000),
+            makeChatDB: { try ChatDB(path: path, book: AddressBook(), copyToTemp: false, homeDirectoryForTilde: home) },
+            automation: MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in })
+        )
+        #expect(throws: MessagesReplyComposerParentError.fixtureUnlabeled) { try action.resolve() }
+        #expect(driver.message.performed.isEmpty)
     }
 
     @Test func parentObservedActionVerifiesFreshDBBeforeClear() throws {
@@ -2565,7 +2645,7 @@ struct MessagesReplyComposerAXAutomationTests {
         }
         clipboard.emptyTypesWhenNilItems = true
         #expect(try clipboard.snapshot(deadline: .millisecondsFromNow(5_000)).items.isEmpty)
-        let count = try clipboard.clearContentsReturningCount(deadline: .millisecondsFromNow(5_000))
+        let count = try clipboard.clearContentsReturningCount(expectedCount: clipboard.original.changeCount, deadline: .millisecondsFromNow(5_000))
         try clipboard.verifyEmpty(ownerCount: count, deadline: .millisecondsFromNow(5_000))
     }
 
@@ -2729,10 +2809,32 @@ struct MessagesReplyComposerAXAutomationTests {
 
     @Test func attachmentDraftRestorationAcceptsOwnedNonemptyClipboardWithoutWriteCountAdvance() throws {
         let clipboard = FakeMessagesClipboard()
-        try clipboard.restore(clipboard.original, deadline: .millisecondsFromNow(5_000))
+        try clipboard.restore(clipboard.original, ownerCount: clipboard.original.changeCount, deadline: .millisecondsFromNow(5_000))
         #expect(clipboard.current.items == clipboard.original.items)
         #expect(clipboard.current.changeCount == clipboard.original.changeCount + 1)
         #expect(clipboard.restoredSnapshots.count == 1)
+    }
+
+    @Test func anotherClipboardOwnerSurvivesClearPublishAndRestore() throws {
+        let clipboard = FakeMessagesClipboard()
+        let original = clipboard.original
+        let replacement = MessagesClipboardSnapshot(changeCount: original.changeCount + 1,
+            items: [[MessagesClipboardRepresentation(type: "public.utf8-plain-text", data: Data("another app".utf8))]])
+        clipboard.current = replacement
+        let deadline = WorkerDeadline.millisecondsFromNow(5_000)
+        #expect(throws: MessagesReplyComposerAXError.replyAttachmentClipboardDrift) {
+            _ = try clipboard.clearContentsReturningCount(expectedCount: original.changeCount, deadline: deadline)
+        }
+        #expect(clipboard.current == replacement)
+        #expect(throws: MessagesReplyComposerAXError.replyAttachmentClipboardDrift) {
+            _ = try clipboard.publishAndVerifyFileURL(URL(fileURLWithPath: "/tmp/apple-cli-test.bin"),
+                                                      ownerCount: original.changeCount, deadline: deadline)
+        }
+        #expect(clipboard.current == replacement)
+        #expect(throws: MessagesReplyComposerAXError.replyAttachmentClipboardDrift) {
+            try clipboard.restore(original, ownerCount: original.changeCount, deadline: deadline)
+        }
+        #expect(clipboard.current == replacement)
     }
 
     @Test func attachmentDraftPublishRejectsExternalClipboardCountDrift() throws {
@@ -2750,7 +2852,7 @@ struct MessagesReplyComposerAXAutomationTests {
             if failure == 0 { clipboard.writeSucceeds = false }
             if failure == 1 { clipboard.mutateAfterWrite = true }
             if failure == 2 { clipboard.externalChangeCountAfterWrite = true }
-            #expect(throws: Error.self) { try clipboard.restore(clipboard.original, deadline: .millisecondsFromNow(5_000)) }
+            #expect(throws: Error.self) { try clipboard.restore(clipboard.original, ownerCount: clipboard.original.changeCount, deadline: .millisecondsFromNow(5_000)) }
             #expect(clipboard.restoredSnapshots.count == 1)
             #expect(clipboard.current.changeCount > clipboard.original.changeCount)
         }
@@ -2760,9 +2862,9 @@ struct MessagesReplyComposerAXAutomationTests {
         let clipboard = FakeMessagesClipboard()
         let expired = WorkerDeadline.millisecondsFromNow(0)
         #expect(throws: Error.self) { _ = try clipboard.snapshot(deadline: expired) }
-        #expect(throws: Error.self) { _ = try clipboard.clearContentsReturningCount(deadline: expired) }
+        #expect(throws: Error.self) { _ = try clipboard.clearContentsReturningCount(expectedCount: clipboard.original.changeCount, deadline: expired) }
         #expect(throws: Error.self) { _ = try clipboard.publishAndVerifyFileURL(URL(fileURLWithPath: "/tmp/apple-cli-test.bin"), ownerCount: 1, deadline: expired) }
-        #expect(throws: Error.self) { try clipboard.restore(clipboard.original, deadline: expired) }
+        #expect(throws: Error.self) { try clipboard.restore(clipboard.original, ownerCount: clipboard.original.changeCount, deadline: expired) }
         #expect(clipboard.current == clipboard.original)
         #expect(clipboard.restoredSnapshots.isEmpty)
     }
@@ -2958,6 +3060,7 @@ private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
     var replyWindowChildrenOverride: (() -> [FakeReplyNode])?
     var extraWindowChildren: [FakeReplyNode] = []
     var trusted = true
+    var lookupFailure: MessagesReactionAXError?
     var processAvailable = true
     var openCount = 0
     var onOpen: (() -> Void)?
@@ -2986,7 +3089,7 @@ private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
         mainTranscript.staticChildren = [message]
         replyTranscript.staticChildren = []
         message.onAction = { [weak self] name in
-            guard MessagesAXActionMatcher.matches(name, title: "Reply") else { throw MessagesReplyComposerAXError.replyActionUnavailable }
+            guard MessagesReactionAXAutomation.matchesAction(name, title: "Reply") else { throw MessagesReplyComposerAXError.replyActionUnavailable }
             self?.replyVisible = true
         }
         replyTranscript.onAction = { [weak self] name in
@@ -3002,6 +3105,15 @@ private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
         openCount += 1
         onOpen?()
         return process
+    }
+    func openMessages(url: URL, deadline: WorkerDeadline,
+                      inspectExisting: (MessagesAXProcess) throws -> [any MessagesAXElement]) throws -> MessagesAXProcess {
+        if let lookupFailure { throw lookupFailure }
+        if processAvailable {
+            let windows = try inspectExisting(process)
+            try LiveMessagesReactionAXDriver.checkWindowsBeforeOpen(root: root, inspected: windows, deadline: deadline)
+        }
+        return try openMessages(url: url, deadline: deadline)
     }
     func canonicalMessagesProcess(deadline: WorkerDeadline) throws -> MessagesAXProcess {
         guard processAvailable else { throw MessagesReplyComposerAXError.axFailure }
@@ -3022,7 +3134,8 @@ private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
         guard appFocusAvailable else { return nil }
         return appFocusedOverride ?? (replyVisible ? replyBody : normalBody)
     }
-    func replyActionTitles(deadline: WorkerDeadline) throws -> [String] { ["Reply"] }
+    var replyTitles = ["Reply", "Reply…"]
+    func replyActionTitles(deadline: WorkerDeadline) throws -> [String] { replyTitles }
     func normalComposePlaceholders(deadline: WorkerDeadline) throws -> [String] { ["iMessage", "Text Message"] }
     func replyTranscriptDescription(deadline: WorkerDeadline) throws -> String? { "Reply transcript" }
     private var process: MessagesAXProcess { MessagesAXProcess(identity: identity, root: canonicalRootOverride ?? root) }
@@ -3234,7 +3347,8 @@ private final class FakeMessagesClipboard: MessagesClipboarding, MessagesClipboa
         return publishSucceeds
     }
 
-    func writeItems(_ items: [[MessagesClipboardRepresentation]], deadline: WorkerDeadline) throws -> Bool {
+    func writeItems(_ items: [[MessagesClipboardRepresentation]], ownerCount: Int, deadline: WorkerDeadline) throws -> Bool {
+        guard current.changeCount == ownerCount else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
         restoredSnapshots.append(MessagesClipboardSnapshot(changeCount: current.changeCount, items: items))
         let restored = mutateAfterWrite ? [[MessagesClipboardRepresentation(type: "public.utf8-plain-text", data: Data("drift".utf8))]] : items
         current = MessagesClipboardSnapshot(changeCount: current.changeCount + (externalChangeCountAfterWrite ? 1 : 0), items: restored)

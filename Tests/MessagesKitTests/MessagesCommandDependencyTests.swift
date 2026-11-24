@@ -55,6 +55,7 @@ extension MessagesCommandDependencies {
         MessagesCommandDependencies(
             loadAddressBook: loadAddressBook ?? { book },
             makeChatDB: makeChatDB,
+            replyDatabaseLocation: { try makeChatDB($0).replyLocation },
             performSend: performSend,
             dbDiagnostic: dbDiagnostic,
             addressBookDiagnostic: addressBookDiagnostic,
@@ -2197,6 +2198,122 @@ struct MessagesCommandDependencyTests {
         #expect(result.exitCode == AppleExit.usage)
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func groupReplyPreviewResolvesExactTarget(nested: Bool, file: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        try fx.exec("UPDATE chat_message_join SET chat_id=1 WHERE message_id IN (70,71)")
+        let path = try scratch.directory().appendingPathComponent("apple-cli-test-group.txt")
+        try Data("group preview".utf8).write(to: path)
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx) { _ in launched.withLock { $0 = true }; return .timedOut }
+        let args = ["--chat-guid", "iMessage;+;chat999", "--message-guid", nested ? "reply-selected" : "reply-root",
+                    "--part-index", "2", "--dry-run"] + (file ? ["--file", path.path] : ["--body", "group preview"])
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        let target = try #require(output["target"] as? [String: Any])
+        #expect(output["executed"] as? Bool == false)
+        #expect(target["participant_count"] as? Int == 2)
+        #expect(target["participant_handle"] == nil)
+        #expect(target["message_rowid"] as? Int == (nested ? 71 : 70))
+        #expect(target["native_part"] as? Int == 2)
+        let root = try #require(target["thread_root"] as? [String: Any])
+        #expect(root["message_guid"] as? String == "reply-root")
+        if file {
+            let attachment = try #require(output["attachment"] as? [String: Any])
+            #expect(attachment["basename"] as? String == path.lastPathComponent)
+        }
+        #expect(!result.stdout.contains("+12125550101") && !result.stdout.contains("+12125550102"))
+        #expect(!launched.value)
+        #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
+    }
+
+    @Test(arguments: [["--dry-run", "--test-mode"], ["--execute", "--experimental-ui-handoff"],
+                      ["--execute", "--experimental-ui-handoff", "--test-mode"]])
+    func groupReplyPreviewCannotLaunchGroupSend(_ posture: [String]) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target", chatRowid: 1)
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550101", "+12125550102"]) { _ in
+            launched.withLock { $0 = true }; return .timedOut
+        }
+        let args = ["--chat-rowid", "1", "--message-rowid", "70", "--part-index", "2", "--body", "apple-cli-test reply"] + posture
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(result.exitCode != nil)
+        #expect(!launched.value)
+        #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
+    }
+
+    @Test(arguments: ["UPDATE chat SET service_name='SMS' WHERE ROWID=1",
+                      "UPDATE message SET service='RCS' WHERE ROWID=70",
+                      "UPDATE chat SET guid='iMessage;+;chat999' WHERE ROWID=2",
+                      "INSERT INTO message(ROWID,guid) VALUES(100,'reply-target')",
+                      "INSERT INTO chat_message_join VALUES(3,70)",
+                      "INSERT INTO chat_message_join VALUES(3,'70x')",
+                      "INSERT INTO chat_message_join VALUES(3,CAST('70' AS BLOB))",
+                      "INSERT INTO chat_message_join VALUES(3,70.5)",
+                      "ALTER TABLE handle ADD COLUMN _rowid_ INTEGER GENERATED ALWAYS AS (ROWID) VIRTUAL",
+                      "DELETE FROM chat_handle_join WHERE chat_id=1",
+                      "INSERT INTO chat_handle_join VALUES(1,2)",
+                      "INSERT INTO chat_handle_join VALUES('1x',1)",
+                      "INSERT INTO chat_handle_join VALUES(1,99)",
+                      "UPDATE handle SET id=printf('%0513d',1) WHERE ROWID=2",
+                      "UPDATE handle SET id=CAST(X'FF' AS TEXT) WHERE ROWID=2"])
+    func groupReplyPreviewRefusesAmbiguousEvidence(_ setup: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target", chatRowid: 1)
+        try fx.exec(setup)
+        let args = ["--chat-rowid", "1", "--message-rowid", "70", "--part-index", "2", "--body", "group preview", "--dry-run"]
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: replyDependencies(fx)) }
+        #expect(result.exitCode != nil)
+        #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
+    }
+
+    @Test(arguments: [false, true])
+    func groupReplyRefusesInvalidNativeAddressAtEitherEnd(_ malformedRoot: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        try fx.exec("UPDATE chat_message_join SET chat_id=1 WHERE message_id IN (70,71)")
+        if malformedRoot {
+            try fx.exec("UPDATE message SET guid='bad/root' WHERE ROWID=70")
+            try fx.exec("UPDATE message SET thread_originator_guid='bad/root' WHERE ROWID=71")
+        } else {
+            try fx.exec("UPDATE message SET guid='bad/selected' WHERE ROWID=71")
+        }
+        let args = ["--chat-rowid", "1", "--message-rowid", "71", "--part-index", "2",
+                    "--body", "group preview", "--dry-run"]
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: replyDependencies(fx)) }
+        #expect(result.exitCode == AppleExit.usage)
+        #expect(result.stdout.contains("group reply target has no valid native part address"))
+        #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
+    }
+
+    @Test(arguments: [1, 32, 33])
+    func groupReplyParticipantBounds(_ count: Int) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target", chatRowid: 1)
+        try fx.exec("DELETE FROM chat_handle_join WHERE chat_id=1")
+        for i in 1...count {
+            let handle = i + 100
+            try fx.exec("INSERT INTO handle VALUES(\(handle),'member-\(i)@example.invalid','iMessage')")
+            try fx.exec("INSERT INTO chat_handle_join VALUES(1,\(handle))")
+        }
+        let args = ["--chat-rowid", "1", "--message-rowid", "70", "--part-index", "2", "--body", "group preview", "--dry-run"]
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: replyDependencies(fx)) }
+        if count <= 32 {
+            #expect(result.exitCode == nil)
+            let output = try payload(from: result.stdout)
+            let target = try #require(output["target"] as? [String: Any])
+            #expect(target["participant_count"] as? Int == count)
+            #expect(target["participant_handle"] == nil)
+            #expect(!result.stdout.contains("@example.invalid"))
+        } else {
+            #expect(result.exitCode != nil)
+        }
+        #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
+    }
+
     @Test func replySendDryRunResolvesExactTargetWithoutWorkerOrJournal() throws {
         let fx = try ChatFixture()
         try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
@@ -2694,20 +2811,43 @@ struct MessagesCommandDependencyTests {
         #expect(FileManager.default.fileExists(atPath: copy) == false)
     }
 
-    @Test func replySendAttachmentLauncherThrowBeforeHandoffCleansPreparedCopy() throws {
+    @Test(arguments: ["launcher-error", "timeout", "cancelled"])
+    func replySendAttachmentFailureBeforeHandoffCleansPreparedCopy(_ outcome: String) throws {
         let fx = try ChatFixture()
         try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
         let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
         try Data("apple-cli-test attachment".utf8).write(to: fileURL)
         let preparedCopy = LockedBox<String?>(nil)
         let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
-            let resolved = try action.resolve()
-            let payload = try #require(resolved.command.payload)
-            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
-            let draft = try #require(request.attachmentDraft)
-            preparedCopy.withLock { $0 = draft.copyPath }
-            #expect(FileManager.default.fileExists(atPath: draft.copyPath) == true)
-            throw AppleError.upstream("synthetic launcher failure before handoff")
+            let resolve = {
+                let resolved = try action.resolve()
+                let payload = try #require(resolved.command.payload)
+                let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
+                let draft = try #require(request.attachmentDraft)
+                preparedCopy.withLock { $0 = draft.copyPath }
+                #expect(FileManager.default.fileExists(atPath: draft.copyPath))
+                return resolved
+            }
+            if outcome == "launcher-error" {
+                _ = try resolve()
+                throw AppleError.upstream("synthetic launcher failure before handoff")
+            }
+            let cancelled = outcome == "cancelled"
+            let launcher = WorkerLauncher(testSpawnedPIDHook: { _ in Issue.record("Unexpected worker dispatch") })
+            let result = try launcher.launchObserved(WorkerObservedAction(
+                stateRoot: action.stateRoot, deadline: action.deadline, resolve: resolve,
+                preflight: { resolved, _ in
+                    let context = WorkerObservedContext(deadline: cancelled ? action.deadline : .millisecondsFromNow(0),
+                                                        isCancelled: { cancelled })
+                    return try action.preflight(resolved, context)
+                }, verify: action.verify))
+            #expect(result.description == (cancelled ? "cancelled" : "timedOut"))
+            let snapshot = try AppleAutomationJournal.withLockedJournal(root: action.stateRoot,
+                                                                        deadline: .millisecondsFromNow(1_000)) { lease in
+                try lease.loadSnapshot()
+            }
+            #expect(snapshot.pending == nil)
+            return result
         }
 
         let result = try captureCommand {
@@ -3020,8 +3160,9 @@ struct MessagesCommandDependencyTests {
         let verified = LockedBox(false)
         let deps = replyDependencies(fx, launchObservedWorker: { action in
             let resolved = try action.resolve()
-            let context = WorkerObservedContext(deadline: .millisecondsFromNow(1), isCancelled: { false })
-            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            let preflight = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, preflight) == .requiresMutation)
+            let context = WorkerObservedContext(deadline: .millisecondsFromNow(0), isCancelled: { false })
             let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
                                           category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
             #expect(throws: WorkerProtocolError.deadlineExpired) {
@@ -3212,6 +3353,105 @@ struct MessagesCommandDependencyTests {
         #expect(!result.stdout.contains("sent_message_guid"))
     }
 
+    @Test(arguments: [false, true], ["shared", "shared-during-clean", "malformed-link", "duplicate-guid", "replaced-guid", "unrelated",
+                                     "send-failed", "reparented", "payload-changed", "new-matching-row",
+                                     "equivalent-identifier", "rebound-row"])
+    func replyReceiptRequiresStableEvidence(file: Bool, change: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let resultGUID = change == "equivalent-identifier" && !file ? "sent-é" : "sent-reply"
+        let fileGUID = change == "equivalent-identifier" ? "file-é" : "sent-file"
+        let path = fx.path
+        let base = fx.base
+        let sentFile = URL(fileURLWithPath: fx.homePath)
+            .appendingPathComponent("Library/Messages/Attachments/zz/sent-reply.bin")
+        let bytes = Data("apple-cli-test receipt".utf8)
+        let input = try scratch.directory().appendingPathComponent("apple-cli-test-receipt.txt")
+        if file { try bytes.write(to: input) }
+        let cleaned = LockedBox(false)
+        let handoffs = LockedBox(0)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"], launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            handoffs.withLock { $0 += 1 }
+            if file {
+                try bytes.write(to: sentFile)
+                try insertAttachmentReplyResultRow(path: path, rowid: 1000, guid: resultGUID,
+                                                   attachmentRowid: 900, attachmentGUID: fileGUID,
+                                                   filename: "~/Library/Messages/Attachments/zz/sent-reply.bin",
+                                                   totalBytes: bytes.count, base: base)
+            } else {
+                try insertReplyResultRow(path: path, rowid: 1000, guid: resultGUID, text: "apple-cli-test reply", base: base)
+            }
+            if change == "shared" {
+                try execReplySQL(path: path, "INSERT INTO chat_message_join VALUES (1, 1000)")
+            }
+            let op = UUID()
+            let response = WorkerResponse(schemaVersion: 1, operationID: op, nonce: op, category: .ack,
+                                          detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            guard let verification = try action.verify(resolved, response, context) else { return .verificationFailed }
+            return .observedState(operationID: op, verification: verification)
+        }, verifyReplyCleanState: { _, _, _ in
+            cleaned.withLock { $0 = true }
+            switch change {
+            case "send-failed":
+                try execReplySQL(path: path, "UPDATE message SET error=1 WHERE ROWID=1000")
+            case "reparented":
+                try execReplySQL(path: path, "UPDATE message SET thread_originator_part='3' WHERE ROWID=1000")
+            case "payload-changed":
+                if file {
+                    try Data(repeating: 65, count: bytes.count).write(to: sentFile)
+                } else {
+                    try execReplySQL(path: path, "UPDATE message SET text='changed' WHERE ROWID=1000")
+                }
+            case "new-matching-row":
+                if file {
+                    try insertAttachmentReplyResultRow(path: path, rowid: 1001, guid: "second", attachmentRowid: 901,
+                                                       attachmentGUID: "second-file", filename: "~/Library/Messages/Attachments/zz/sent-reply.bin",
+                                                       totalBytes: bytes.count, base: base)
+                } else {
+                    try insertReplyResultRow(path: path, rowid: 1001, guid: "second", text: "apple-cli-test reply", base: base)
+                }
+            case "equivalent-identifier":
+                if file {
+                    try execReplySQL(path: path, "UPDATE attachment SET guid='file-e\u{301}' WHERE ROWID=900")
+                } else {
+                    try execReplySQL(path: path, "UPDATE message SET guid='sent-e\u{301}' WHERE ROWID=1000")
+                }
+            case "rebound-row":
+                try execReplySQL(path: path, """
+                    UPDATE message SET ROWID=1001 WHERE ROWID=1000;
+                    UPDATE chat_message_join SET message_id=1001 WHERE message_id=1000;
+                    UPDATE message_attachment_join SET message_id=1001 WHERE message_id=1000;
+                    """)
+            case "shared-during-clean":
+                try execReplySQL(path: path, "INSERT INTO chat_message_join VALUES (1, 1000)")
+            case "malformed-link":
+                try execReplySQL(path: path, "INSERT INTO chat_message_join VALUES (1, CAST('1000' AS BLOB))")
+            case "duplicate-guid", "unrelated":
+                try insertReplyResultRow(path: path, rowid: 1001, guid: change == "duplicate-guid" ? "sent-reply" : "other",
+                                         text: "apple-cli-test other chat", base: base, chatRowid: 1)
+            case "replaced-guid":
+                try execReplySQL(path: path, "UPDATE message SET guid='replaced' WHERE ROWID=1000")
+            default: break
+            }
+            return MessagesReplyComposerProbeDetail.verified
+        })
+        let args = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                    "--experimental-ui-handoff", "--test-mode"] + (file ? ["--file", input.path] : ["--body", "apple-cli-test reply"])
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(handoffs.value == 1)
+        #expect(cleaned.value == (change != "shared"))
+        if change == "unrelated" {
+            #expect(result.exitCode == nil)
+            #expect(try payload(from: result.stdout)["sent_message_guid"] as? String == "sent-reply")
+        } else {
+            #expect(result.exitCode == AppleExit.upstream)
+            #expect(!result.stdout.contains("sent_message_guid"))
+        }
+    }
+
     @Test func replySendExecuteVerifiesFreshDBCorrespondenceBeforeSuccess() throws {
         let fx = try ChatFixture()
         try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
@@ -3290,6 +3530,71 @@ struct MessagesCommandDependencyTests {
                 #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
             }
         }
+    }
+
+    @Test(arguments: [false, true])
+    func replySandboxRequiresNativeTargetLabel(_ execute: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target", text: "ordinary target")
+        try fx.exec("UPDATE message SET text='apple-cli-test target' WHERE ROWID=70")
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx) { _ in
+            launched.withLock { $0 = true }
+            return .verificationFailed
+        }
+        let args = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                    "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode",
+                    execute ? "--execute" : "--dry-run"]
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        #expect(!launched.value)
+    }
+
+    @Test(arguments: [true, false])
+    func replyWorkerRechecksNativeTargetLabel(_ sandbox: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let path = fx.path, checked = LockedBox(false)
+        let deps = replyDependencies(fx) { action in
+            let resolved = try action.resolve()
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: #require(resolved.command.payload))
+            let validator = MessagesReplyWorkerTarget(databasePath: path)
+            try validator.validate(request, deadline: action.deadline)
+            let text = "ordinary target"
+            let archive = commandNativeArchive(text, [
+                (commandNativePartKey, NSNumber(value: 2), commandReactionRange(text, "target")),
+            ])
+            try replaceReplyAttributedBody(path: path, rowid: 70, body: archive)
+            if sandbox {
+                #expect(throws: MessagesReplyComposerAXError.targetDrift) {
+                    try validator.validate(request, deadline: action.deadline)
+                }
+            } else {
+                try validator.validate(request, deadline: action.deadline)
+            }
+            checked.withLock { $0 = true }
+            return .verificationFailed
+        }
+        var args = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                    "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--execute"]
+        if sandbox { args.append("--test-mode") }
+        _ = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(checked.value)
+    }
+
+    @Test(arguments: ["NULL", "'apple-cli-test alternate display'"])
+    func replySandboxAllowsLabeledArchiveWithOptionalDisplay(_ displayed: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        try fx.exec("UPDATE message SET text=\(displayed) WHERE ROWID=70")
+        let deps = replyDependencies(fx)
+        let args = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                    "--body", "apple-cli-test reply", "--dry-run", "--test-mode"]
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        let preview = try payload(from: result.stdout)
+        #expect(result.exitCode == nil)
+        #expect(preview["dry_run"] as? Bool == true)
+        #expect(preview["executed"] as? Bool == false)
     }
 
     @Test func replySendSandboxRequiresLabeledTextAndAllowedRecipient() throws {

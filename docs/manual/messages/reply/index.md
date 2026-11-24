@@ -10,11 +10,11 @@ apple messages reply
 
 ## Description
 
-Groups experimental exact threaded reply sends for Messages. The current subcommand sends either bounded text or one single-file attachment reply to an exact message in a direct conversation.
+Groups experimental exact threaded reply sends for Messages. It sends text or one file in a direct conversation and can preview a reply to an exact iMessage group target.
 
 ## Subcommands
 
-- [`send`](./send.md) — Send a text or attachment reply to an exact message in a direct chat.
+- [`send`](./send.md) — Send a direct reply or preview a group reply to an exact message.
 
 ## Inherited options
 
@@ -47,7 +47,7 @@ apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --f
 
 ## Notes
 
-Reply sends are experimental UI handoffs. Dry run resolves the exact selected target, its supported thread relationship, and sandbox policy without driving Messages UI or creating journal state; attachment dry runs also resolve the shared attachment source and preview the selected file path, basename and byte count without creating a draft copy. Execution requires `--experimental-ui-handoff`, the shared Messages automation journal, Accessibility trust and a direct one-recipient conversation. Group replies are not enabled in this unit. Agent-run live writes must use the sandbox and target only operator-approved test recipients.
+Reply sends are experimental UI handoffs. Dry run resolves the exact selected target, its supported thread relationship, and sandbox policy without driving Messages UI or creating journal state; attachment dry runs also resolve the shared attachment source and preview the selected file path, basename and byte count without creating a draft copy. Execution requires `--experimental-ui-handoff`, the shared Messages automation journal, Accessibility trust and a direct one-recipient conversation. Outside test mode, a dry run can resolve an iMessage group with 1 to 32 identifiable participants. Group previews report only the participant count. Agent-run live writes must use the sandbox and target only operator-approved test recipients.
 
 ## Output
 

@@ -99,7 +99,7 @@ JSON output are stable per the versioning policy — breaking changes bump
   notification flags. Older databases report `missing-schema` for absent fields.
 - **Exact Messages reads expose native delivery, error and read metadata.** `messages get` and `messages history` add `native_status`, preserving strict integer values and per-field missing, null, malformed and timestamp-sentinel states. Timestamp strings use whole Apple-epoch seconds while raw values and subsecond remainders retain precision. These are native row observations, not per-recipient receipts or send-success proof.
 
-- **Experimental exact Messages replies accept text or one attachment through `apple messages reply send`.** The command resolves an exact message in a direct conversation, previews with `--dry-run`, and requires `--experimental-ui-handoff` to execute. Text uses `--body`, bounded to 2048 UTF-8 bytes; `--file` uses the shared attachment path policy and 25 MiB cap. Attachment success requires a fresh same-chat reply marked sent without a recorded error, strict selected-parent or separately identified thread-root correspondence, matching persisted file content, and clean UI/clipboard restoration. Uncertain sends retain the pending guard and private copy; copy reclamation follows durable success and reports any incomplete cleanup separately. This does not establish recipient delivery or general attachment compatibility. Text replies require a locally successful send status before returning the sent message. Nested targets bind the selected message and its unique single-part root independently. Additive relationship fields distinguish exact-parent proof from native thread-root correspondence; root proof refuses concurrent outgoing rows and never claims a database-proven immediate parent. Group replies remain unsupported. Sandbox runs target labeled test content and allowed test recipients. Manual: [`reply send`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/reply/send.md).
+- **Experimental exact Messages replies accept text or one attachment through `apple messages reply send`.** The command resolves an exact message in a direct conversation, previews with `--dry-run`, and requires `--experimental-ui-handoff` to execute. Text uses `--body`, bounded to 2048 UTF-8 bytes; `--file` uses the shared attachment path policy and 25 MiB cap. Attachment success requires a fresh same-chat reply marked sent without a recorded error, strict selected-parent or separately identified thread-root correspondence, matching persisted file content, and clean UI/clipboard restoration. Uncertain sends retain the pending guard and private copy; copy reclamation follows durable success and reports any incomplete cleanup separately. This does not establish recipient delivery or general attachment compatibility. Text replies require a locally successful send status before returning the sent message. Nested targets bind the selected message and its unique single-part root independently. Additive relationship fields distinguish exact-parent proof from native thread-root correspondence; root proof refuses concurrent outgoing rows and never claims a database-proven immediate parent. Dry runs outside test mode can resolve an iMessage group, selected part and thread root, reporting the participant count. Sending requires a direct conversation. Sandbox runs target labeled test content and allowed test recipients. Manual: [`reply send`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/reply/send.md).
 
 - **`apple messages doctor` now reports status-only Accessibility trust diagnostics alongside its existing Full Disk Access, Messages database and AddressBook checks.** The JSON result includes the current process trust status, fixed `current_process` identity and remediation notes without prompting or changing settings; the text result names the same status, and the command still succeeds when Accessibility is denied. Other launches may have different Accessibility permissions and must check their own status before acting. Manual: [`apple messages doctor`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/doctor.md).
 
@@ -693,6 +693,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   success, the parent process rechecks the attachment identity, finished transfer
   state and local file readability.
 
+- Messages uses the app’s language preferences for Reply and Edit action titles,
+  the reply transcript label, and composer placeholders.
+
+- Attachment reply verification now rechecks the stored file path after hashing.
+  A moved directory, replacement file, or symlink leaves the reply unverified.
+
 - Exact message reads use the selected conversation for group names and the
   message row for attachment membership.
 - Conversation activity uses exact chat membership. Conversation and history pages
@@ -712,6 +718,13 @@ JSON output are stable per the versioning policy — breaking changes bump
   A leading U+FEFF in a stored GUID now survives exact Messages reads and pagination.
 - Messages automation rejects altered operation identifiers in its journal and worker messages before accepting recovery or completion.
 - Messages automation rejects a named pipe in place of its state file without waiting for a writer. Concurrent first use can share the newly created journal directory.
+
+- Messages replies recognize the macOS Reply action in languages where its wording or punctuation differs from the base label.
+
+- Test-mode replies verify the label in both the displayed text and the native
+  message body before acting on the selected target.
+
+- Attachment replies stop when a clipboard ownership change is observed before clearing, publishing the file URL, or restoring the saved contents.
 
 - Attachment reply verification preserves the distinction between SQL NULL and
   an empty BLOB. When the verifier needs a body field and finds an empty BLOB,

@@ -64,6 +64,11 @@ struct MessagesReplyWorkerTarget {
               try AppleAutomationJournal.targetDigest(forOpaqueIdentifier: body).value == request.expectedBodySHA256
         else { throw MessagesReplyComposerAXError.targetDrift }
 
+        if let prefix = request.sandboxPrefix,
+           !selected.decoded.hasLabel(prefix, displayed: body) {
+            throw MessagesReplyComposerAXError.targetDrift
+        }
+
         let origin = selected.origin
         if origin.available && origin.reason == "no-linkage" {
             guard request.expectedThreadRelationshipSHA256 == nil else { throw MessagesReplyComposerAXError.targetDrift }
@@ -78,7 +83,7 @@ struct MessagesReplyWorkerTarget {
         else { throw MessagesReplyComposerAXError.targetDrift }
         let target = ChatDB.ExactReplyTarget(chat_rowid: chatID, chat_guid: request.chatGUID, message_rowid: selected.id,
             message_guid: request.messageGUID, native_part: part.index, part_guid: part.attachmentGUID,
-            participant_handle: address, is_from_me: selected.fromMe, thread_root: .init(message_rowid: root.id,
+            participants: [address], isGroup: false, is_from_me: selected.fromMe, thread_root: .init(message_rowid: root.id,
                 message_guid: guid, native_part: index, part_guid: rootPart.attachmentGUID, is_from_me: root.fromMe),
             thread_originator: origin)
         guard try replyRelationshipDigest(target) == request.expectedThreadRelationshipSHA256 else { throw MessagesReplyComposerAXError.targetDrift }
