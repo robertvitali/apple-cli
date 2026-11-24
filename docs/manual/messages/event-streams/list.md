@@ -35,6 +35,10 @@ Inspect the local streams
 apple messages event-streams list
 ```
 
+## Notes
+
+If an interrupted watch leaves a stream marked `recovery-required`, listing it leaves its journal untouched. To resume an initialized stream, run `apple messages watch --resume "$CURSOR"` with your last saved checkpoint. The watcher attempts recovery before replay. After processing a complete event, save its `data.cursor`. If the checkpoint has expired, follow the [watch resynchronization instructions](../watch.md#notes).
+
 ## Output
 
 Each JSON row identifies a stream, its status, filter digest, oldest retained sequence and head sequence. Some fields are null when the journal cannot be inspected. See [the JSON contract](../../reference/json-contract.md) and [exit codes](../../reference/exit-codes.md).

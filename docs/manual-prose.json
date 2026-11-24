@@ -356,6 +356,7 @@
   },
   "apple messages event-streams list": {
     "description": "List private event streams for the current account, including streams that are busy or require recovery. An account with no registry returns an empty array.",
+    "notes": "If an interrupted watch leaves a stream marked `recovery-required`, listing it leaves its journal untouched. To resume an initialized stream, run `apple messages watch --resume \"$CURSOR\"` with your last saved checkpoint. The watcher attempts recovery before replay. After processing a complete event, save its `data.cursor`. If the checkpoint has expired, follow the [watch resynchronization instructions](../watch.md#notes).",
     "examples": [
       {
         "title": "Inspect the local streams",
