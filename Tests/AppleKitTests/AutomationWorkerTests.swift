@@ -666,6 +666,25 @@ struct AutomationWorkerTests {
         }
     }
 
+    @Test("a separate attachment observation is bound to the original operation")
+    func attachmentObservationConfirmsAfterHandoff() throws {
+        let root = try scratch.directory().appendingPathComponent("attachment-confirm", isDirectory: true)
+        let outcome = try launchObservedThroughProbe(root: root, command: "probe.attachment-observation")
+        #expect(outcome.contains(",confirmed-download)|pending=none|receipts=observedState"))
+    }
+
+    @Test("cancelling the second worker preserves the first handoff and releases the lock")
+    func cancelAttachmentObservationRetainsPending() throws {
+        let root = try scratch.directory().appendingPathComponent("attachment-cancel", isDirectory: true)
+        let outcome = try launchObservedThroughProbe(root: root, command: "probe.cancel-attachment-observation")
+        #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("cancel-now").path))
+        #expect(outcome.contains("|pending=uncertainAfterHandoff|receipts=none"))
+        try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(500)) { lease in
+            let snapshot = try lease.loadSnapshot()
+            #expect(snapshot.pending?.phase == .uncertainAfterHandoff)
+        }
+    }
+
     @Test("observed action clears pending only after ACK and verifier success")
     func observedActionClearsPendingAfterAckAndVerifierSuccess() throws {
         let root = try scratch.directory().appendingPathComponent("observed-ok-\(UUID().uuidString)", isDirectory: true)

@@ -27,6 +27,40 @@ import Testing
             partIndex: 0, sandboxPrefix: sandbox, deadline: deadline, isCancelled: isCancelled)
     }
 
+    @Test(arguments: ["unchanged", "unrelated", "path", "equivalent-path", "transfer", "second-file", "recipient", "membership"])
+    func confirmationRechecksTheBoundSnapshotAfterFileInspection(_ change: String) throws {
+        let fx = try fixture()
+        try fx.exec("""
+            INSERT INTO attachment(ROWID,guid,filename,transfer_state) VALUES(85,'sibling','sibling.bin',5);
+            INSERT INTO message_attachment_join VALUES(60,85);
+            UPDATE attachment SET filename='caf\u{e9}.bin' WHERE ROWID=10
+            """)
+        let payload = try read(fx, sandbox: "apple-cli-test").request
+        let worker = MessagesAttachmentDownloadObservation(payload: payload, databasePath: fx.path, homeDirectory: fx.homePath)
+        let result = Result {
+            try worker.confirmDownloaded(deadline: .millisecondsFromNow(5000)) { items in
+                #expect(items.count == 2)
+                switch change {
+                case "unchanged": break
+                case "unrelated": try fx.exec("UPDATE message SET text='other' WHERE ROWID=1")
+                case "path": try fx.exec("UPDATE attachment SET filename='moved.bin' WHERE ROWID=10")
+                case "equivalent-path": try fx.exec("UPDATE attachment SET filename='cafe\u{301}.bin' WHERE ROWID=10")
+                case "transfer": try fx.exec("UPDATE attachment SET transfer_state=3 WHERE ROWID=10")
+                case "second-file": try fx.exec("UPDATE attachment SET transfer_state=3 WHERE ROWID=85")
+                case "recipient": try fx.exec("UPDATE handle SET id='other@example.invalid' WHERE ROWID IN (SELECT handle_id FROM chat_handle_join WHERE chat_id=3)")
+                case "membership": try fx.exec("DELETE FROM message_attachment_join WHERE message_id=60 AND attachment_id=85")
+                default: Issue.record("Unexpected test case")
+                }
+                return true
+            }
+        }
+        if change == "recipient" || change == "membership" {
+            #expect(throws: MessagesAXNavigationError.targetDrift) { try result.get() }
+        } else {
+            #expect(try result.get() == (change == "unchanged" || change == "unrelated"))
+        }
+    }
+
     @Test(arguments: [(0, false), (2, false), (0, true), (2, true)])
     func attachmentRequiresOneNativeAddress(_ index: Int, _ repeated: Bool) throws {
         let fx = try fixture()
@@ -54,6 +88,29 @@ import Testing
             #expect(request.selectedAttachmentGUID == "a10")
             #expect(request.nativePartIndex == index)
         }
+    }
+
+    @Test func sandboxChecksTheLabelBytesOnBothRepresentations() throws {
+        let fx = try fixture()
+        let prefix = "test-\u{e9}"
+        let alternate = "test-e\u{301}"
+        let body = NSMutableAttributedString(string: prefix + " \u{fffc}")
+        let attachment = NSRange(location: body.length - 1, length: 1)
+        let part = NSAttributedString.Key("__kIMMessagePartAttributeName")
+        body.addAttribute(part, value: 1, range: NSRange(location: 0, length: attachment.location))
+        body.addAttribute(part, value: 0, range: attachment)
+        body.addAttribute(.init("__kIMFileTransferGUIDAttributeName"), value: "a10", range: attachment)
+        let bytes = NSArchiver.archivedData(withRootObject: body).map { String(format: "%02x", $0) }.joined()
+        try fx.exec("UPDATE message SET attributedBody=X'\(bytes)', text='\(prefix) caption' WHERE ROWID=60")
+        #expect(try read(fx, sandbox: prefix).request.selectedAttachmentGUID == "a10")
+        #expect(throws: MessagesAttachmentTargetResolver.Failure.sandboxViolation) {
+            try read(fx, sandbox: alternate)
+        }
+        try fx.exec("UPDATE message SET text='\(alternate) caption' WHERE ROWID=60")
+        #expect(throws: MessagesAttachmentTargetResolver.Failure.sandboxViolation) {
+            try read(fx, sandbox: prefix)
+        }
+        #expect(try read(fx).request.selectedAttachmentGUID == "a10")
     }
 
     @Test func sandboxPolicyIsBoundAndNativeTextCanSupplyLabel() throws {

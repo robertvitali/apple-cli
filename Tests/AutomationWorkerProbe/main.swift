@@ -8,6 +8,15 @@ func c_fork() -> pid_t
 struct ProbeOperation: WorkerOperation {
     func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerOperationResult {
         switch request.command.name {
+        case WorkerCommand.attachmentObservation:
+            guard let data = request.command.payload, let value = String(data: data, encoding: .utf8) else { return .refused }
+            if value == request.operationID.uuidString {
+                return .init(.ack, detail: "attachment-retrieval-already-downloaded-verified")
+            }
+            guard URL(fileURLWithPath: value).lastPathComponent == "cancel-now" else { return .refused }
+            try Data().write(to: URL(fileURLWithPath: value))
+            Thread.sleep(forTimeInterval: 10)
+            return .failed
         case "probe.empty":
             let extraDescriptors = (3..<64).filter { fcntl(Int32($0), F_GETFD) >= 0 }
             return extraDescriptors.count == 2 ? .ack : .failed
@@ -178,8 +187,13 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
             }
             return .requiresMutation
         },
-        verify: { _, _, context in
+        verify: { _, response, context in
             switch commandName {
+            case "probe.attachment-observation", "probe.cancel-attachment-observation":
+                let value = commandName == "probe.attachment-observation" ? response.operationID.uuidString : cancelMarker
+                let confirmed = try WorkerLauncher().confirmDownloadedAttachment(payload: Data(value.utf8),
+                    operationID: response.operationID, context: context)
+                return confirmed ? "confirmed-download" : nil
             case "probe.verify-lock":
                 guard try competingProcessCannotAcquire(root: root) else { throw WorkerProtocolError.invalidDescriptor }
                 return "verified-lock"

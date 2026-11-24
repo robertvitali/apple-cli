@@ -332,6 +332,51 @@ private final class AttachmentPressNode: MessagesAXElement {
         return try operation.run(request, deadline: request.deadline)
     }
 
+    @Test(arguments: ["stable", "selected-transfer", "sibling-path", "recipient", "membership"])
+    func finalPressCheckRebindsAfterFileInspection(_ change: String) throws {
+        let fx = try fixture(), driver = AttachmentPressFixture()
+        try fx.exec("""
+            INSERT INTO message_attachment_join VALUES(60,11);
+            UPDATE attachment SET filename='~/Library/Messages/Attachments/caf\u{e9}.bin' WHERE ROWID=11;
+            """)
+        let deadline = WorkerDeadline.millisecondsFromNow(5000)
+        let capture = try MessagesAttachmentTargetResolver.read(databasePath: fx.path, chat: .rowid(3),
+            message: .rowid(60), partIndex: 0, sandboxPrefix: "apple-cli-test", deadline: deadline)
+        let observation = MessagesAttachmentDownloadObservation(payload: capture.request, databasePath: fx.path,
+                                                                homeDirectory: fx.homePath)
+        let press = MessagesAttachmentAXPress(driver: driver, isTargetEligible: driver.eligible)
+        let diagnostic = MessagesAttachmentDiagnostic()
+        var checks = 0
+        let result = Result {
+            try press.perform(messageGUID: capture.request.messageGUID, nativePartIndex: 0,
+                              nativePartGUID: nil, deadline: deadline) {
+                checks += 1
+                return try observation.read(deadline, verification: false, diagnostic: diagnostic) { items in
+                    let observed = try MessagesAttachmentObservation.evaluate(items: items, homeDirectory: fx.homePath,
+                        selectedAttachmentGUID: capture.request.selectedAttachmentGUID, deadline: deadline)
+                    if checks == 3 {
+                        switch change {
+                        case "selected-transfer": try fx.exec("UPDATE attachment SET transfer_state=7 WHERE ROWID=10")
+                        case "sibling-path": try fx.exec("UPDATE attachment SET filename='~/Library/Messages/Attachments/cafe\u{301}.bin' WHERE ROWID=11")
+                        case "recipient": try fx.exec("UPDATE handle SET id='other@example.invalid' WHERE ROWID=1")
+                        case "membership": try fx.exec("DELETE FROM message_attachment_join WHERE message_id=60 AND attachment_id=11")
+                        default: break
+                        }
+                    }
+                    return observed
+                }.pressOutcome
+            }
+        }
+        #expect(checks == 3)
+        if change == "stable" {
+            try result.get()
+            #expect(driver.message.performed == ["AXPress"])
+        } else {
+            #expect(throws: MessagesAXNavigationError.targetDrift) { try result.get() }
+            #expect(driver.message.performed.isEmpty)
+        }
+    }
+
     @Test(arguments: ["navigation", "press", "eligibility", "initial-binding", "verification-read",
                       "initial-state", "verification-state"])
     func workerReturnsOnlyFixedDiagnosticAndNeverRetries(_ stage: String) throws {

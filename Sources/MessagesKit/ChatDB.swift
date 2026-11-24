@@ -485,6 +485,12 @@ public struct ChatDB {
 
     private func attachmentPath(from raw: String?) -> (path: String?, exists: Bool?) {
         guard let raw, !raw.isEmpty, !raw.utf8.contains(0) else { return (nil, nil) }
+        return MessagesAttachmentFileAccess.withoutMaterialization(unavailable: (nil, nil)) {
+            localAttachmentPath(from: raw)
+        }
+    }
+
+    private func localAttachmentPath(from raw: String) -> (path: String?, exists: Bool?) {
         let expanded: String
         if raw == "~" {
             expanded = homeDirectoryForTilde

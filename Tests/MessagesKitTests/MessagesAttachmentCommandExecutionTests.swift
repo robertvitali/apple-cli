@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import SQLite3
 import Testing
 @testable import AppleKit
 @testable import MessagesKit
@@ -12,7 +13,7 @@ import Testing
         body.addAttribute(NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"), value: "a10", range: NSRange(location: 0, length: 1))
         try fx.insertMessage(rowid: 60, guid: "synthetic-attachment-message", attributedBody: NSArchiver.archivedData(withRootObject: body),
             chatRowid: 3, date: fx.base, cacheHasAttachments: true)
-        try fx.exec("INSERT INTO message_attachment_join VALUES(60,10)")
+        try fx.exec("INSERT INTO message_attachment_join VALUES(60,10); ALTER TABLE attachment ADD COLUMN transfer_state; UPDATE attachment SET transfer_state=5 WHERE ROWID=10")
         return fx
     }
     private func dependencies(_ fx: ChatFixture,
@@ -26,7 +27,13 @@ import Testing
         do {
             try Output.withStreams(CLIStreams(stdout: stdout, stderr: stderr)) {
                 try MessagesAttachmentRetrieve.parse(["--chat-rowid", "3", "--message-rowid", "60", "--part-index", "0"] + flags)
-                    .run(dependencies: dependencies, databasePath: fx.path)
+                    .run(dependencies: dependencies, databasePath: fx.path, confirmDownload: { data, _, context in
+                        let payload = try JSONDecoder().decode(MessagesAttachmentRetrievalRequest.self, from: data)
+                        let observation = MessagesAttachmentDownloadObservation(payload: payload, databasePath: fx.path,
+                                                                               homeDirectory: fx.homePath)
+                        return try observation.read(context.deadline, verification: true,
+                                                    diagnostic: MessagesAttachmentDiagnostic()).outcome == .downloaded
+                    })
             }
         } catch let exit as ExitCode { code = exit.rawValue }
         return (String(decoding: stdout.data, as: UTF8.self), code)
@@ -126,6 +133,39 @@ import Testing
         #expect(result.0.contains("recover before retrying"))
     }
 
+    @Test(arguments: ["pending", "unknown", "missing-file", "new-member", "different-message", "participant", "different-native-part"],
+          ["attachment-retrieval-downloaded-verified", "attachment-retrieval-already-downloaded-verified"])
+    func staleWorkerSuccessCannotVerifyAttachment(_ change: String, _ detail: String) throws {
+        let fx = try fixture()
+        let path = fx.path, localFile = fx.presentAttachmentPath
+        let deps = dependencies(fx) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack, detail: detail)
+            let statement: String
+            switch change {
+            case "missing-file":
+                try FileManager.default.moveItem(atPath: localFile, toPath: localFile + ".moved")
+                statement = "SELECT 1"
+            case "pending": statement = "UPDATE attachment SET transfer_state=4 WHERE ROWID=10"
+            case "unknown": statement = "UPDATE attachment SET transfer_state=NULL WHERE ROWID=10"
+            case "new-member": statement = "INSERT INTO message_attachment_join VALUES(60,11)"
+            case "different-message": statement = "UPDATE message SET guid='different' WHERE ROWID=60"
+            case "participant": statement = "UPDATE handle SET id='+12125550101' WHERE ROWID=1"
+            default: statement = "UPDATE message SET attributedBody=NULL WHERE ROWID=60"
+            }
+            var db: OpaquePointer?
+            try #require(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+            defer { sqlite3_close(db) }
+            try #require(sqlite3_exec(db, statement, nil, nil, nil) == SQLITE_OK)
+            #expect(try action.verify(resolved, response, context) == nil)
+            return .verificationFailed
+        }
+        let result = try run(fx, flags: ["--experimental-ui-handoff"], dependencies: deps)
+        #expect(result.1 != nil)
+    }
+
     @Test func verifiedResultIsExplicitlyExecuted() throws {
         let fx = try fixture()
         let deps = dependencies(fx) { action in
@@ -164,4 +204,53 @@ import Testing
         #expect(result.1 == 69)
     }
 
+}
+
+extension MessagesAttachmentCommandExecutionTests {
+    @Test(arguments: WorkerAttachmentStatus.allCases)
+    func statusEmitsOnlyExactTargetAndWorkerState(_ state: WorkerAttachmentStatus) throws {
+        let fx = try fixture()
+        let command = try #require(try MessagesCommand.parseAsRoot(["attachment", "status", "--dry-run",
+            "--chat-rowid", "3", "--message-rowid", "60", "--part-index", "0",
+            "--expected-attachment-guid", "a10"]) as? MessagesAttachmentStatus)
+        let out = MemoryOutputSink()
+        var calls = 0
+        try Output.withStreams(CLIStreams(stdout: out, stderr: MemoryOutputSink())) {
+            try command.run(databasePath: fx.path) { bytes, deadline in
+                calls += 1
+                let payload = try JSONDecoder().decode(MessagesAttachmentRetrievalRequest.self, from: bytes)
+                #expect(payload.selectedAttachmentGUID == "a10")
+                #expect(!deadline.expired)
+                return state
+            }
+        }
+        let data = try decodedData(String(decoding: out.data, as: UTF8.self))
+        #expect(calls == 1)
+        #expect(Set(data.keys) == ["chat_rowid", "message_rowid", "native_part", "state"])
+        #expect(data["chat_rowid"] as? Int == 3)
+        #expect(data["message_rowid"] as? Int == 60)
+        #expect(data["native_part"] as? Int == 0)
+        #expect(data["state"] as? String == state.rawValue)
+    }
+
+    @Test func staleStatusTargetEmitsErrorBeforeWorker() throws {
+        let fx = try fixture()
+        let command = try MessagesAttachmentStatus.parse(["--chat-rowid", "3", "--message-rowid", "60",
+            "--part-index", "0", "--expected-attachment-guid", "stale-private-fixture", "--dry-run"])
+        let out = MemoryOutputSink()
+        #expect(throws: ExitCode.self) {
+            try Output.withStreams(CLIStreams(stdout: out, stderr: MemoryOutputSink())) {
+                try command.run(databasePath: fx.path) { _, _ in
+                    Issue.record("Stale target reached the status worker")
+                    return .pending
+                }
+            }
+        }
+        let envelope = try #require(JSONSerialization.jsonObject(with: out.data) as? [String: Any])
+        #expect(envelope["ok"] as? Bool == false)
+        #expect(envelope["data"] == nil)
+        let error = try #require(envelope["error"] as? [String: Any])
+        #expect(error["message"] as? String == "the selected part does not match the expected attachment GUID")
+        #expect(!String(decoding: out.data, as: UTF8.self).contains("stale-private-fixture"))
+    }
 }

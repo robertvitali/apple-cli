@@ -6,10 +6,10 @@ import Testing
 @testable import MessagesKit
 
 @Suite struct MessagesAttachmentErrorContractTests {
-    @Test(arguments: ["label", "group", "recipient", "empty-recipient", "nonempty-recipient", "blob-label", "rowid", "missing", "part", "native-guid", "schema"], [false, true])
+    @Test(arguments: ["label", "group", "recipient", "empty-recipient", "nonempty-recipient", "blob-label", "text-label", "rowid", "missing", "part", "native-guid", "schema"], [false, true])
     func expectedRefusalsHavePublicErrorCategories(_ scenario: String, _ execute: Bool) throws {
         let fx = try ChatFixture()
-        let body = NSMutableAttributedString(string: scenario == "blob-label" ? "unlabeled \u{fffc}" : "apple-cli-test \u{fffc}")
+        let body = NSMutableAttributedString(string: ["blob-label", "text-label"].contains(scenario) ? "unlabeled \u{fffc}" : "apple-cli-test \u{fffc}")
         let range = NSRange(location: body.length - 1, length: 1)
         body.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 1),
                           range: NSRange(location: 0, length: range.location))
@@ -21,13 +21,14 @@ import Testing
         var message = "60", part = "0"
         var expectedType = "safety_violation"
         var expectedCode: Int32 = 77
-        let sandbox = ["label", "group", "recipient", "empty-recipient", "nonempty-recipient", "blob-label"].contains(scenario)
+        let sandbox = ["label", "group", "recipient", "empty-recipient", "nonempty-recipient", "blob-label", "text-label"].contains(scenario)
         switch scenario {
         case "label": try fx.exec("UPDATE message SET text='unlabeled' WHERE ROWID=60")
         case "group": try fx.exec("UPDATE chat SET style=43 WHERE ROWID=3")
         case "recipient": break
         case "empty-recipient": try fx.exec("UPDATE handle SET id='synthetic-peer' WHERE ROWID=1")
         case "nonempty-recipient": try fx.exec("UPDATE handle SET id='synthetic-peer-12125550100' WHERE ROWID=1")
+        case "text-label": try fx.exec("UPDATE message SET text='apple-cli-test forged label' WHERE ROWID=60")
         case "blob-label":
             try fx.exec("UPDATE message SET text=CAST('apple-cli-test forged label' AS BLOB) WHERE ROWID=60")
             expectedType = "validation_error"; expectedCode = 64

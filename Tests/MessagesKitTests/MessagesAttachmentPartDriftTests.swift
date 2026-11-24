@@ -68,7 +68,7 @@ import Testing
         #expect(driver.calls == 0)
     }
 
-    @Test(arguments: [4, 5], ["native-guid", "native-part-key", "native-guid-key", "database-guid", "unindexed-label", "chat-guid", "message-guid", "participant", "filename", "body-text", "blob-text", "native-root"])
+    @Test(arguments: [4, 5], ["native-guid", "native-part-key", "native-guid-key", "database-guid", "unindexed-label", "chat-guid", "message-guid", "participant", "filename", "body-text", "text-label", "blob-text", "native-root"])
     func changedUTF8BytesRefuseActionAndDownloadedSuccess(_ transferState: Int, _ scenario: String) throws {
         let fx = try fixture(), driver = AttachmentPartDriftNoUIDriver()
         func archive(partKey: String = "__kIMMessagePartAttributeName",
@@ -94,6 +94,9 @@ import Testing
             partIndex: 0, sandboxPrefix: "apple-cli-test", deadline: .millisecondsFromNow(5000), isCancelled: { false })
         switch scenario {
         case "unindexed-label": try install(archive(indexedLabel: false))
+        case "text-label":
+            try install(archive(text: "unlabeled \u{fffc}"))
+            try fx.exec("UPDATE message SET text='apple-cli-test forged label' WHERE ROWID=60")
         case "blob-text":
             try install(archive(text: "unlabeled \u{fffc}"))
             try fx.exec("UPDATE message SET text=CAST('apple-cli-test forged label' AS BLOB) WHERE ROWID=60")
@@ -129,6 +132,59 @@ import Testing
         let result = try operation.run(request, deadline: request.deadline)
         #expect(result.category != .ack)
         #expect(driver.calls == 0)
+    }
+
+    @Test(arguments: [4, 5], [false, true])
+    func selectedTransferGUIDMustHaveOneDatabaseOwner(transferState: Int, blobAlias: Bool) throws {
+        let fx = try fixture()
+        try fx.exec("""
+            UPDATE attachment SET guid='unbound-attachment', transfer_state=\(transferState) WHERE ROWID=10;
+            INSERT INTO attachment(ROWID,guid) VALUES(80,'unbound-attachment-neighbor');
+            INSERT INTO message_attachment_join VALUES(1,80);
+            """)
+        func read() throws -> MessagesAttachmentTargetResolver.Capture {
+            try MessagesAttachmentTargetResolver.read(databasePath: fx.path, chat: .rowid(3),
+                message: .rowid(60), partIndex: 0, sandboxPrefix: nil, deadline: .millisecondsFromNow(5000))
+        }
+        let original = try read()
+        #expect(original.request.selectedAttachmentGUID == "unbound-attachment")
+
+        let alias = blobAlias ? "CAST('unbound-attachment' AS BLOB)" : "'unbound-attachment'"
+        try fx.exec("UPDATE attachment SET guid=\(alias) WHERE ROWID=80")
+        #expect(throws: MessagesAttachmentTargetResolver.Failure.invalidTarget) { try read() }
+        let driver = AttachmentPartDriftNoUIDriver()
+        let registry = MessagesAttachmentRetrievalWorkerRegistry(driver: driver,
+            databasePath: fx.path, homeDirectory: fx.homePath)
+        let command = try WorkerCommand(name: "messages.attachment.retrieve", payload: original.request.workerPayloadData())
+        let request = request(command)
+        let operation = try #require(registry.operation(for: command))
+        let result = try operation.run(request, deadline: request.deadline)
+        #expect(result.category != .ack)
+        #expect(driver.calls == 0)
+    }
+
+    @Test(arguments: ["42", "42.5"])
+    func numericStorageCannotImpersonateASelectedTextGUID(_ guid: String) throws {
+        let fx = try fixture()
+        let text = NSMutableAttributedString(string: "\u{fffc}")
+        let range = NSRange(location: 0, length: 1)
+        text.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 0), range: range)
+        text.addAttribute(.init("__kIMFileTransferGUIDAttributeName"), value: guid, range: range)
+        let bytes = NSArchiver.archivedData(withRootObject: text).map { String(format: "%02x", $0) }.joined()
+        try fx.exec("""
+            UPDATE message SET attributedBody=X'\(bytes)' WHERE ROWID=60;
+            ALTER TABLE attachment RENAME COLUMN guid TO former_guid;
+            ALTER TABLE attachment ADD COLUMN guid BLOB;
+            UPDATE attachment SET guid='\(guid)' WHERE ROWID=10;
+            CREATE INDEX fixture_transfer_guid ON attachment(guid);
+            """)
+        func read() throws -> MessagesAttachmentTargetResolver.Capture {
+            try MessagesAttachmentTargetResolver.read(databasePath: fx.path, chat: .rowid(3),
+                message: .rowid(60), partIndex: 0, sandboxPrefix: nil, deadline: .millisecondsFromNow(5000))
+        }
+        #expect(try read().request.selectedAttachmentGUID == guid)
+        try fx.exec("INSERT INTO attachment(ROWID,guid) VALUES(80,\(guid))")
+        #expect(throws: MessagesAttachmentTargetResolver.Failure.invalidTarget) { try read() }
     }
 
     @Test func unrelatedNativeAttachmentPartCannotReportDownloaded() throws {

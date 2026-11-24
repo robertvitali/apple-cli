@@ -1,6 +1,6 @@
 # apple messages attachment
 
-Retrieve attachments from an exact Messages target.
+Inspect or retrieve attachments from an exact Messages target.
 
 ## Synopsis
 
@@ -11,6 +11,7 @@ apple messages attachment
 ## Subcommands
 
 - [`retrieve`](./retrieve.md) — Request attachment loading through Messages and verify local availability.
+- [`status`](./status.md) — Inspect the transfer and local readability of one exact attachment part.
 
 ## Inherited options
 

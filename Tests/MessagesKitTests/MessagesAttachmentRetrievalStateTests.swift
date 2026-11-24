@@ -22,6 +22,8 @@ import AppleKit
         for raw in Int64(0)...9 {
             let expected: State.Outcome = raw == 5 ? .downloaded : ((6...8).contains(raw) ? .failed : .pending)
             #expect(State.evaluate(expected: [id], observed: [observed(id, raw: raw)], completeJoin: true) == expected)
+            let placeholder: State.Outcome = raw == 5 ? .unavailable : expected
+            #expect(State.evaluate(expected: [id], observed: [observed(id, raw: raw, file: .dataless)], completeJoin: true) == placeholder)
             #expect(State.evaluate(expected: [id], observed: [observed(id, raw: raw, file: .unavailable)], completeJoin: true) == .unavailable)
         }
         #expect(State.evaluate(expected: [id], observed: [observed(id, raw: 5, file: .missing)], completeJoin: true) == .missing)

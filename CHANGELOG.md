@@ -24,6 +24,10 @@ JSON output are stable per the versioning policy — breaking changes bump
   Records omit message bodies and include exact conversation and message identifiers.
   Event streams can be listed with retention details and retired by
   exact stream ID. Retirement supports a dry-run preview of local journal files.
+
+- `apple messages attachment status` reports the observed load state of an exact
+  attachment part without requesting a download.
+
 - Experimental [exact-part editing](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/edit.md)
   previews replacement text and checks own-message eligibility, protects existing
   drafts, and verifies persisted content and edit history in both worker and
@@ -39,7 +43,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   can leave a pending operation requiring inspection and recovery. Before pressing,
   the worker rechecks the transfer identity and state after reading the native
   controls, then verifies the selected part still belongs to the transcript and
-  window. Live retrieval reliability has not yet been established.
+  window. Pass `--expected-attachment-guid` to require the transfer seen in an
+  earlier read to still occupy the selected part.
+  Local file checks disable automatic downloads and recognize dataless
+  placeholders. Get, history, recent and search also check attachment paths
+  with automatic downloads disabled. Live retrieval reliability has not yet
+  been established.
 
 - Exact message get/history reads now expose strict native attachment transfer
   observations, including unknown and unavailable states. A finished native
@@ -678,6 +687,11 @@ JSON output are stable per the versioning policy — breaking changes bump
 - Messages UI actions stop when macOS reports that the session is off the console or login is incomplete.
 
 - `apple messages automation status --text` includes the pending operation ID, type and handoff phase.
+
+- In Messages test mode, attachment retrieval checks the test label on the native
+  attachment message and on its stored plain text when present. Before recording
+  success, the parent process rechecks the attachment identity, finished transfer
+  state and local file readability.
 
 - Exact message reads use the selected conversation for group names and the
   message row for attachment membership.

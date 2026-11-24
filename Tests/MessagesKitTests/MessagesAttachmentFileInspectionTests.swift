@@ -18,7 +18,18 @@ import Testing
         let root = URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments")
         let fifo = root.appendingPathComponent("synthetic-fifo").path
         #expect(mkfifo(fifo, 0o600) == 0)
-        #expect(try probe.inspect(filename: fifo) == .unavailable)
+        var writerConnected = false
+        let observed = try probe.inspect(filename: fifo) {
+            let writer = open(fifo, O_WRONLY | O_NONBLOCK | O_CLOEXEC)
+            if writer >= 0 {
+                writerConnected = true
+                close(writer)
+            } else {
+                #expect(errno == ENXIO)
+            }
+        }
+        #expect(observed == .unavailable)
+        #expect(!writerConnected)
         let directoryLink = root.appendingPathComponent("directory-link").path
         try FileManager.default.createSymbolicLink(atPath: directoryLink, withDestinationPath: root.appendingPathComponent("zz").path)
         #expect(try probe.inspect(filename: directoryLink + "/apple-cli-present.png") == .unavailable)
@@ -58,6 +69,38 @@ import Testing
             #expect(chmod(empty.path, 0) == 0)
             defer { chmod(empty.path, 0o600) }
             #expect(try probe.inspect(filename: empty.path) == .unavailable)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func inspectionTemporarilyDisablesMaterialization(cancel: Bool) throws {
+        enum Stop: Error { case cancelled }
+        let fx = try ChatFixture()
+        let type = IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES
+        let scope = IOPOL_SCOPE_THREAD
+        let previous = getiopolicy_np(type, scope)
+        try #require(previous >= 0)
+        try #require(setiopolicy_np(type, scope, IOPOL_MATERIALIZE_DATALESS_FILES_ON) == 0)
+        defer { _ = setiopolicy_np(type, scope, previous) }
+
+        let inspector = MessagesAttachmentFileInspection(homeDirectory: fx.homePath)
+        var checks = 0
+        let result = Result {
+            try inspector.inspect(filename: fx.presentAttachmentPath) {
+                checks += 1
+                // The first checkpoint precedes all filesystem work.
+                if checks > 1 {
+                    #expect(getiopolicy_np(type, scope) == IOPOL_MATERIALIZE_DATALESS_FILES_OFF)
+                    if cancel { throw Stop.cancelled }
+                }
+            }
+        }
+        #expect(checks > 1)
+        #expect(getiopolicy_np(type, scope) == IOPOL_MATERIALIZE_DATALESS_FILES_ON)
+        if cancel {
+            #expect(throws: Stop.cancelled) { try result.get() }
+        } else {
+            #expect(try result.get() == .readableRegularFile)
         }
     }
 

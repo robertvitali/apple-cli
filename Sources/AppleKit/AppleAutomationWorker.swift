@@ -30,6 +30,8 @@ package struct WorkerDeadline: Codable, Equatable, Sendable {
 
 
 package struct WorkerCommand: Codable, Equatable, Sendable, CustomStringConvertible {
+    package static let attachmentObservation = "messages.attachment.observe"
+    package static let attachmentStatus = "messages.attachment.status"
     package let name: String
     package let payload: Data?
 
@@ -120,6 +122,17 @@ package struct WorkerRequest: Codable, Equatable, Sendable {
                       parent: fields.decode(WorkerProcessIdentity.self, forKey: .parent),
                       workerExecutable: fields.decode(WorkerExecutableIdentity.self, forKey: .workerExecutable),
                       command: fields.decode(WorkerCommand.self, forKey: .command))
+    }
+}
+
+package enum WorkerAttachmentStatus: String, CaseIterable, Sendable {
+    case pending, downloaded, missing, failed, unavailable
+
+    package var detail: String { "attachment-status-" + rawValue }
+
+    package init?(detail: String) {
+        guard let status = Self.allCases.first(where: { $0.detail == detail }) else { return nil }
+        self = status
     }
 }
 
@@ -282,7 +295,7 @@ package struct WorkerOperationResult: Equatable, Sendable {
 
     private static func safeDetail(_ value: String?) -> String? {
         guard let value, value.utf8.count <= 128 else { return nil }
-        guard publicDetails.contains(value) || isSafeTargetDriftDetail(value) || isSafeVerificationDetail(value) ||
+        guard publicDetails.contains(value) || WorkerAttachmentStatus(detail: value) != nil || isSafeTargetDriftDetail(value) || isSafeVerificationDetail(value) ||
             isSafeCustomChooserAXFailureDetail(value) || isSafeCustomChooserReactionUnavailableDetail(value) ||
             isSafeReplyAttachmentOwnershipDetail(value) || isSafeEditDiagnostic(value) ||
             isSafeAttachmentDiagnostic(value) else { return nil }
@@ -1098,6 +1111,54 @@ package struct WorkerLauncher {
     private func exchange(request: WorkerLaunchRequest, frame: WorkerRequest, encoded: Data,
                           lease: AppleAutomationJournal.JournalLease, preparedOperationID: UUID,
                           isCancelled: () -> Bool = { false }) -> WorkerExchangeResult {
+        exchangeFrame(frame, encoded: encoded, isCancelled: isCancelled, beforeSend: {
+            try lease.markUncertainAfterHandoff(operationID: preparedOperationID)
+        }, validateBinding: {
+            mutateJournalBeforeAckValidation?(request.journal.root)
+            let pending = try lease.loadSnapshot().pending
+            return pending?.operationID == frame.operationID && pending?.phase == .uncertainAfterHandoff &&
+                pending?.matches(request.journal.request) == true
+        }, spawnFailed: {
+            try? lease.recordNoDeliveryBeforeHandoff(operationID: preparedOperationID)
+        })
+    }
+
+    /// Run one fresh read under the original deadline while the caller holds its lease.
+    /// Only the observation command can use this path without a mutation handoff.
+    package func confirmDownloadedAttachment(payload: Data, operationID: UUID, context: WorkerObservedContext) throws -> Bool {
+        guard !context.isCancelled, !context.deadline.expired else { return false }
+        let command = try WorkerCommand(name: WorkerCommand.attachmentObservation, payload: payload)
+        guard let frame = makeWorkerFrame(operationID: operationID, command: command, deadline: context.deadline) else {
+            return false
+        }
+        let result = exchangeFrame(frame, encoded: try JSONEncoder().encode(frame),
+            isCancelled: { context.isCancelled }, beforeSend: {}, validateBinding: { true }, spawnFailed: {})
+        guard case .response(let response) = result else { return false }
+        return response.detail == "attachment-retrieval-already-downloaded-verified" &&
+            !context.isCancelled && !context.deadline.expired
+    }
+
+    /// Inspect one exact part in the supervised read-only worker. This command
+    /// never enters the mutation journal or selects a Messages UI operation.
+    package func attachmentStatus(payload: Data, deadline: WorkerDeadline) throws -> WorkerAttachmentStatus {
+        let command = try WorkerCommand(name: WorkerCommand.attachmentStatus, payload: payload)
+        guard !deadline.expired,
+              let frame = makeWorkerFrame(operationID: UUID(), command: command, deadline: deadline) else {
+            throw AppleError.upstream("Attachment status observation could not start.")
+        }
+        let result = exchangeFrame(frame, encoded: try JSONEncoder().encode(frame),
+            isCancelled: { false }, beforeSend: {}, validateBinding: { true }, spawnFailed: {})
+        guard case .response(let response) = result, response.category == .ack,
+              let detail = response.detail, let status = WorkerAttachmentStatus(detail: detail),
+              !deadline.expired else {
+            throw AppleError.upstream("Attachment status could not be verified for the requested target.")
+        }
+        return status
+    }
+
+    private func exchangeFrame(_ frame: WorkerRequest, encoded: Data, isCancelled: () -> Bool,
+                               beforeSend: () throws -> Void, validateBinding: () throws -> Bool,
+                               spawnFailed: () -> Void) -> WorkerExchangeResult {
         var owned = Set<Int32>()
         func keep(_ fd: Int32) -> Int32 { owned.insert(fd); return fd }
         func closeOwned(_ fd: Int32) { if owned.remove(fd) != nil { try? io.close(fd) } }
@@ -1130,14 +1191,14 @@ package struct WorkerLauncher {
             closeAll()
             observe()
             if killChild, ownsChild, maySignal, pid > 1, pid != getpgrp() { _ = Darwin.kill(-pid, SIGTERM) }
-            let termBudget = request.deadline.boundedNanoseconds(signalGraceNanoseconds)
+            let termBudget = frame.deadline.boundedNanoseconds(signalGraceNanoseconds)
             let termDeadline = DispatchTime(uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ termBudget)
-            while termBudget > 0, DispatchTime.now() < termDeadline, ownsChild { if reapOnce() { return }; _ = poll(nil, 0, request.deadline.pollMilliseconds) }
+            while termBudget > 0, DispatchTime.now() < termDeadline, ownsChild { if reapOnce() { return }; _ = poll(nil, 0, frame.deadline.pollMilliseconds) }
             observe()
             if killChild, ownsChild, maySignal, pid > 1, pid != getpgrp() { _ = Darwin.kill(-pid, SIGKILL) }
-            let reapBudget = request.deadline.boundedNanoseconds(reapGraceNanoseconds)
+            let reapBudget = frame.deadline.boundedNanoseconds(reapGraceNanoseconds)
             let reapDeadline = DispatchTime(uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ reapBudget)
-            while reapBudget > 0, DispatchTime.now() < reapDeadline, ownsChild { if reapOnce() { return }; _ = poll(nil, 0, request.deadline.pollMilliseconds) }
+            while reapBudget > 0, DispatchTime.now() < reapDeadline, ownsChild { if reapOnce() { return }; _ = poll(nil, 0, frame.deadline.pollMilliseconds) }
             transferReap()
         }
 
@@ -1155,24 +1216,19 @@ package struct WorkerLauncher {
             ownsChild = true
             spawnedPIDHook?(pid)
             closeOwned(req.read); closeOwned(resp.write); closeOwned(null)
-            try lease.markUncertainAfterHandoff(operationID: preparedOperationID)
+            try beforeSend()
             try WorkerFrameIO.writeFrame(encoded, to: req.write, cap: WorkerFrameIO.requestCap, io: io,
-                                         deadline: request.deadline, isCancelled: isCancelled)
+                                         deadline: frame.deadline, isCancelled: isCancelled)
             closeOwned(req.write)
             let data = try WorkerFrameIO.readOneFrameThenEOF(from: resp.read, cap: WorkerFrameIO.responseCap, io: io,
-                                                             deadline: request.deadline, isCancelled: isCancelled)
+                                                             deadline: frame.deadline, isCancelled: isCancelled)
             closeOwned(resp.read)
             let response = try JSONDecoder().decode(WorkerResponse.self, from: data)
             cleanup(killChild: false)
             guard response.schemaVersion == 1, response.operationID == frame.operationID, response.nonce == frame.nonce else {
                 return .protocolViolation("response-binding")
             }
-            mutateJournalBeforeAckValidation?(request.journal.root)
-            let snapshot = try lease.loadSnapshot()
-            guard let pending = snapshot.pending,
-                  pending.operationID == frame.operationID,
-                  pending.phase == .uncertainAfterHandoff,
-                  pending.matches(request.journal.request) else {
+            guard try validateBinding() else {
                 return .protocolViolation("journal-binding")
             }
             guard response.category == .ack else { return .childRefusedOrFailed(response.failureReason) }
@@ -1191,9 +1247,9 @@ package struct WorkerLauncher {
             return .protocolViolation("malformed-frame")
         } catch WorkerProtocolError.truncatedFrame {
             cleanup(killChild: true)
-            return request.deadline.expired ? .timedOut : .childRefusedOrFailed("truncated-frame")
+            return frame.deadline.expired ? .timedOut : .childRefusedOrFailed("truncated-frame")
         } catch {
-            if pid == 0 { try? lease.recordNoDeliveryBeforeHandoff(operationID: preparedOperationID) }
+            if pid == 0 { spawnFailed() }
             cleanup(killChild: true)
             return pid == 0 ? .spawnOrSetupFailedBeforeRequest(String(describing: error)) : .childRefusedOrFailed(String(describing: error))
         }

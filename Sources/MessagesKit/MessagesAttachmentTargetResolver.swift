@@ -79,9 +79,12 @@ enum MessagesAttachmentTargetResolver {
             default: throw Failure.invalidTarget
             }
             if let sandboxPrefix {
-                // Native direct-chat style, matching existing strict reply eligibility.
-                guard case .integer(45)? = chatRow.values["style"],
-                      body?.hasPrefix(sandboxPrefix) == true else { throw Failure.sandboxViolation }
+                // The archive identifies the native attachment. Both representations must carry the test label.
+                let prefix = sandboxPrefix.utf8
+                guard case .integer(45)? = chatRow.values["style"], !prefix.isEmpty,
+                      text.utf8.starts(with: prefix), body?.utf8.starts(with: prefix) == true else {
+                    throw Failure.sandboxViolation
+                }
             }
 
             var participants: [String] = []
@@ -102,8 +105,19 @@ enum MessagesAttachmentTargetResolver {
             if sandboxPrefix != nil, participants.count != 1 { throw Failure.sandboxViolation }
             let items = try MessagesAttachmentTargetSnapshot.read(in: scope, chatRowid: chatID,
                 chatGUID: chatGUID, messageRowid: messageID, messageGUID: messageGUID)
-            guard items.contains(where: { $0.identity.guid == Data(attachmentGUID.utf8) }),
+            let guidBytes = Data(attachmentGUID.utf8)
+            guard let selected = items.first(where: { $0.identity.guid == guidBytes }),
                   let membership = MessagesAttachmentMembership(items.map(\.identity)) else { throw Failure.invalidTarget }
+            // Native transfer requests name the GUID. A separate attachment row
+            // outside this message's join set must not be able to claim it.
+            // SQLite stores numeric values below empty TEXT. Include them with
+            // the indexed text/blob lookups before comparing the actual bytes.
+            let owner = try single(scope, """
+                SELECT _rowid_ AS id FROM attachment
+                WHERE (guid IN (?1,CAST(?1 AS BLOB)) OR guid < '')
+                  AND CAST(guid AS BLOB)=CAST(?1 AS BLOB) LIMIT 2
+                """, [attachmentGUID])
+            guard case .integer(selected.identity.rowid)? = owner.values["id"] else { throw Failure.invalidTarget }
             let request = try MessagesAttachmentRetrievalRequest(chatRowid: chatID, chatGUID: chatGUID,
                 messageRowid: messageID, messageGUID: messageGUID, nativePartIndex: partIndex,
                 nativePartGUID: nil, selectedAttachmentGUID: attachmentGUID, participantHandles: participants,

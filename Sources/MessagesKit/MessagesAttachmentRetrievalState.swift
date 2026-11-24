@@ -1,3 +1,4 @@
+import AppleKit
 import Foundation
 
 /// Pure observation logic. Callers must separately establish the exact message,
@@ -23,6 +24,7 @@ enum MessagesAttachmentRetrievalState {
 
     enum FileObservation: Equatable, Sendable {
         case readableRegularFile
+        case dataless
         case missing
         case unavailable
     }
@@ -33,13 +35,7 @@ enum MessagesAttachmentRetrievalState {
         let file: FileObservation
     }
 
-    enum Outcome: Equatable, Sendable {
-        case downloaded
-        case pending
-        case missing
-        case failed
-        case unavailable
-    }
+    typealias Outcome = WorkerAttachmentStatus
 
     /// `completeJoin` must come from a bounded integrity-preserving read, not
     /// from an inner join that can omit dangling attachment references.
@@ -58,6 +54,9 @@ enum MessagesAttachmentRetrievalState {
             guard item.file != .unavailable,
                   let transfer = item.transfer, transfer.status == "available",
                   let raw = transfer.raw, (0...9).contains(raw) else { return .unavailable }
+            // A provider placeholder cannot prove local contents. If Messages
+            // considers its transfer finished, it cannot justify pressing the balloon.
+            if raw == 5 && item.file == .dataless { return .unavailable }
             if (6...8).contains(raw) { failed = true }
             else if raw != 5 { pending = true }
             if item.file == .missing { missing = true }

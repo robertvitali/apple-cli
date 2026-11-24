@@ -4,17 +4,14 @@ import Foundation
 
 struct MessagesAttachment: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "attachment",
-        abstract: "Retrieve attachments from an exact Messages target.", subcommands: [MessagesAttachmentRetrieve.self])
+        abstract: "Inspect or retrieve attachments from an exact Messages target.", subcommands: [MessagesAttachmentRetrieve.self, MessagesAttachmentStatus.self])
     @OptionGroup var global: GlobalOptions
     func run() throws {
-        try runGuarded(tool: tool) { throw AppleError.validation("specify an attachment subcommand: retrieve") }
+        try runGuarded(tool: tool) { throw AppleError.validation("specify an attachment subcommand: retrieve, status") }
     }
 }
 
-struct MessagesAttachmentRetrieve: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "retrieve",
-        abstract: "Request attachment loading through Messages and verify local availability.")
-    @OptionGroup var global: GlobalOptions
+struct MessagesAttachmentTargetOptions: ParsableArguments {
     @Option(name: .long) var chatRowid: Int64?
     @Option(name: .long) var chatGuid: String?
     @Option(name: .long) var messageRowid: Int64?
@@ -24,14 +21,8 @@ struct MessagesAttachmentRetrieve: ParsableCommand {
             help: "Require the selected part to still have the attachment GUID reported by messages get.")
     var expectedAttachmentGUIDs: [String] = []
 
-    @Flag(name: .customLong("experimental-ui-handoff"), help: "Allow bounded Messages UI attachment loading.")
-    var experimentalUIHandoff = false
-
-    func run() throws { try run(dependencies: .live, databasePath: ChatDB.defaultPath()) }
-
-    func resolve(dependencies: MessagesCommandDependencies, databasePath: String,
-                 gate: MessagesWriteGuard.Gate, deadline: WorkerDeadline = .millisecondsFromNow(5000),
-                 isCancelled: @escaping () -> Bool = { false }) throws -> MessagesAttachmentRetrievalRequest {
+    func capture(databasePath: String, gate: MessagesWriteGuard.Gate, deadline: WorkerDeadline,
+                         isCancelled: @escaping () -> Bool) throws -> MessagesAttachmentTargetResolver.Capture {
         let chat: ChatDB.ExactChatSelector
         switch (chatRowid, chatGuid) {
         case (.some(let id), nil): chat = .rowid(id)
@@ -83,10 +74,30 @@ struct MessagesAttachmentRetrieve: ParsableCommand {
                 throw AppleError.validation("the selected part does not match the expected attachment GUID")
             }
         }
-        return capture.request
+        return capture
+    }
+}
+
+struct MessagesAttachmentRetrieve: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "retrieve",
+        abstract: "Request attachment loading through Messages and verify local availability.")
+    @OptionGroup var global: GlobalOptions
+    @OptionGroup var target: MessagesAttachmentTargetOptions
+    @Flag(name: .customLong("experimental-ui-handoff"), help: "Allow bounded Messages UI attachment loading.")
+    var experimentalUIHandoff = false
+
+    func run() throws { try run(dependencies: .live, databasePath: ChatDB.defaultPath()) }
+
+    func resolve(dependencies: MessagesCommandDependencies, databasePath: String,
+                 gate: MessagesWriteGuard.Gate, deadline: WorkerDeadline = .millisecondsFromNow(5000),
+                 isCancelled: @escaping () -> Bool = { false }) throws -> MessagesAttachmentRetrievalRequest {
+        try target.capture(databasePath: databasePath, gate: gate, deadline: deadline, isCancelled: isCancelled).request
     }
 
     func run(dependencies: MessagesCommandDependencies, databasePath: String,
+             confirmDownload: @escaping (Data, UUID, WorkerObservedContext) throws -> Bool = { data, id, context in
+                 try WorkerLauncher().confirmDownloadedAttachment(payload: data, operationID: id, context: context)
+             },
              isCancelled: @escaping () -> Bool = { false }) throws {
         try runGuarded(tool: tool) {
             let gate = try dependencies.resolveGate(global)
@@ -125,6 +136,9 @@ struct MessagesAttachmentRetrieve: ParsableCommand {
                           response.category == .ack,
                           response.detail == "attachment-retrieval-downloaded-verified" ||
                           response.detail == "attachment-retrieval-already-downloaded-verified" else { return nil }
+                    guard let payload = resolved.command.payload,
+                          (try? confirmDownload(payload, response.operationID, context)) == true,
+                          !context.isCancelled, !context.deadline.expired else { return nil }
                     return "Observed finished native transfer and confined local readability for the bound attachment membership; no causal completion claim."
                 }))
             switch outcome {

@@ -16,21 +16,29 @@ struct MessagesAttachmentFileInspection {
     func inspect(filename: String?, checkpoint: () throws -> Void = {}) throws -> MessagesAttachmentRetrievalState.FileObservation {
         try checkpoint()
         guard let filename, let components = confinedComponents(filename) else { return .unavailable }
+        return try MessagesAttachmentFileAccess.withoutMaterialization(unavailable: .unavailable) {
+            try inspectLocal(components, checkpoint: checkpoint)
+        }
+    }
+
+    private func inspectLocal(_ components: [String], checkpoint: () throws -> Void) throws -> MessagesAttachmentRetrievalState.FileObservation {
         let first = try openConfined(components, checkpoint: checkpoint)
         let descriptor: Int32
+        let before: stat
         switch first {
         case .missing: return .missing
+        case .dataless: return .dataless
         case .unavailable: return .unavailable
-        case .opened(let value): descriptor = value
+        case let .opened(fd, info): (descriptor, before) = (fd, info)
         }
         defer { close(descriptor) }
-        guard let before = regularFileStat(descriptor) else { return .unavailable }
+        if before.st_flags & UInt32(SF_DATALESS) != 0 { return .dataless }
         try checkpoint()
         // Reopen through the same no-symlink walk to detect observed path
         // replacement. Neither pass promises continuous namespace stability.
-        guard case .opened(let current) = try openConfined(components, checkpoint: checkpoint) else { return .unavailable }
+        guard case let .opened(current, after) = try openConfined(components, checkpoint: checkpoint) else { return .unavailable }
         defer { close(current) }
-        guard let after = regularFileStat(current),
+        guard after.st_flags & UInt32(SF_DATALESS) == 0,
               before.st_dev == after.st_dev, before.st_ino == after.st_ino,
               before.st_size == after.st_size, before.st_mode == after.st_mode,
               before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
@@ -57,20 +65,18 @@ struct MessagesAttachmentFileInspection {
         return components
     }
 
-    private enum OpenResult { case opened(Int32), missing, unavailable }
+    private enum OpenResult { case opened(Int32, stat), dataless, missing, unavailable }
 
     private func openConfined(_ components: [String], checkpoint: () throws -> Void) throws -> OpenResult {
         try checkpoint()
+        guard let leaf = components.last else { return .unavailable }
         var directory = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard directory >= 0 else { return .unavailable }
-        var keep = false
-        defer { if !keep { close(directory) } }
+        defer { close(directory) }
         let rootComponentCount = home.unicodeScalars.dropFirst().split(separator: "/").count + 3
-        for (index, component) in components.enumerated() {
+        for (index, component) in components.dropLast().enumerated() {
             try checkpoint()
-            let leaf = index == components.count - 1
-            let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (leaf ? 0 : O_DIRECTORY)
-            let next = openat(directory, component, flags)
+            let next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
             guard next >= 0 else { return errno == ENOENT ? .missing : .unavailable }
             close(directory)
             directory = next
@@ -80,15 +86,37 @@ struct MessagesAttachmentFileInspection {
             }
         }
         try checkpoint()
+        // A nonblocking read-open still connects a FIFO peer. Check the named
+        // leaf first, then compare the descriptor since the name can change.
+        var named = stat()
+        guard fstatat(directory, leaf, &named, AT_SYMLINK_NOFOLLOW) == 0 else {
+            return errno == ENOENT ? .missing : .unavailable
+        }
+        guard Self.isOwnedRegularFile(named) else { return .unavailable }
+        let fd = openat(directory, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | O_NOCTTY)
+        guard fd >= 0 else {
+            // The thread policy can refuse a placeholder read-open with EDEADLK.
+            guard errno == EDEADLK else { return .unavailable }
+            var current = stat()
+            if fstatat(directory, leaf, &current, AT_SYMLINK_NOFOLLOW) == 0,
+               Self.isOwnedRegularFile(current), named.st_dev == current.st_dev, named.st_ino == current.st_ino,
+               current.st_flags & UInt32(SF_DATALESS) != 0 {
+                return .dataless
+            }
+            return .unavailable
+        }
+        var keep = false
+        defer { if !keep { close(fd) } }
+        try checkpoint()
+        var opened = stat()
+        guard fstat(fd, &opened) == 0, Self.isOwnedRegularFile(opened),
+              named.st_dev == opened.st_dev, named.st_ino == opened.st_ino else { return .unavailable }
         keep = true
-        return .opened(directory)
+        return .opened(fd, opened)
     }
 
-    private func regularFileStat(_ descriptor: Int32) -> stat? {
-        var info = stat()
-        guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
-              info.st_uid == getuid(), info.st_size >= 0 else { return nil }
-        return info
+    private static func isOwnedRegularFile(_ info: stat) -> Bool {
+        (info.st_mode & S_IFMT) == S_IFREG && info.st_uid == getuid() && info.st_size >= 0
     }
 
     private static func safeText(_ value: String) -> Bool {
