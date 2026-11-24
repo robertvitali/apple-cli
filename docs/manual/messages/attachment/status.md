@@ -56,6 +56,8 @@ On success, `data.chat_rowid` and `data.message_rowid` identify the resolved dat
 
 If the resolved part has a different GUID from any `--expected-attachment-guid`, the command returns `validation_error` (exit 64) before calling the worker. If the worker times out or cannot verify the target after inspecting the file, the command returns `upstream_error` (exit 69). A successful `unavailable` result describes the file evidence for a verified target.
 
+Test mode requires a direct conversation with exactly one allowlisted participant and a message caption beginning with the test prefix (default `apple-cli-test`). In test mode, a file-only message with a labeled filename returns `safety_violation` (exit 77).
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../../reference/json-contract.md) and [exit codes](../../reference/exit-codes.md).
