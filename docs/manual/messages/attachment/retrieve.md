@@ -10,12 +10,14 @@ apple messages attachment retrieve [flags]
 
 ## Description
 
-Requests native attachment loading for an exact message and native attachment part. Select exactly one chat ROWID or GUID and exactly one message ROWID or GUID, then pass the attachment part index reported by messages get. Execution requires --experimental-ui-handoff.
+Requests native attachment loading for an exact message and native attachment part. Select exactly one chat ROWID or GUID and exactly one message ROWID or GUID, then pass the attachment part index reported by messages get. Use --expected-attachment-guid to refuse retrieval if that part now refers to a different attachment. Every supplied GUID must match the selected GUID byte for byte in UTF-8. A mismatch exits with status 64. Execution requires --experimental-ui-handoff.
 
 ## Options
 
 - `--chat-guid` `<chat-guid>`
 - `--chat-rowid` `<chat-rowid>`
+- `--expected-attachment-guid` `<expected-attachment-guid>` *(repeatable)*
+  <br>Require the selected part to still have the attachment GUID reported by messages get.
 - `--experimental-ui-handoff`
   <br>Allow bounded Messages UI attachment loading.
 - `--message-guid` `<message-guid>`
@@ -44,6 +46,12 @@ Preview attachment retrieval
 
 ```console
 apple messages attachment retrieve --chat-rowid 42 --message-rowid 123 --part-index 0 --dry-run
+```
+
+Preview retrieval for the attachment identified by an earlier read
+
+```console
+apple messages attachment retrieve --chat-rowid 42 --message-rowid 123 --part-index 0 --expected-attachment-guid EXAMPLE-GUID --dry-run
 ```
 
 ## Notes

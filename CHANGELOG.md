@@ -31,6 +31,8 @@ JSON output are stable per the versioning policy — breaking changes bump
   unqualified; uncertain outcomes require inspection and recovery. Existing
   output fields and `schema_version` remain unchanged.
 
+- `messages attachment retrieve --expected-attachment-guid` checks that the selected part still refers to the attachment from an earlier read. A mismatch stops before the UI worker starts.
+
 - Experimental [attachment retrieval](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/attachment/retrieve.md)
   requests native loading for an exact message and attachment part, with dry-run
   preview and verification of observed local availability. Uncertain outcomes

@@ -52,6 +52,54 @@ import Testing
         #expect(refused.0.contains("experimental-ui-handoff"))
     }
 
+    @Test func retrievalChecksExpectedAttachmentBeforeLaunchingWorker() throws {
+        let fx = try fixture()
+        let deps = dependencies(fx) { _ in
+            Issue.record("a preview or mismatched identity reached the worker")
+            throw WorkerProtocolError.malformedFrame
+        }
+        let matching = ["--expected-attachment-guid", "a10"]
+        let preview = try run(fx, flags: matching + ["--dry-run"], dependencies: deps)
+        #expect(preview.1 == nil)
+        #expect(try decodedData(preview.0)["dry_run"] as? Bool == true)
+
+        for expected in ["original-transfer", "A10", "a10 ", ""] {
+            let flags = ["--expected-attachment-guid", expected]
+            for mode in [["--dry-run"], ["--execute", "--experimental-ui-handoff"]] {
+                let refused = try run(fx, flags: flags + mode, dependencies: deps)
+                #expect(refused.1 == AppleExit.usage)
+                #expect(refused.0.contains("expected attachment GUID"))
+            }
+        }
+        // A second option cannot replace a stale guard supplied by the caller.
+        let conflict = try run(fx, flags: ["--expected-attachment-guid", "stale"] + matching
+                               + ["--dry-run"], dependencies: deps)
+        #expect(conflict.1 == AppleExit.usage)
+    }
+
+    @Test func expectedAttachmentGUIDUsesExactUTF8() throws {
+        let fx = try fixture()
+        let stored = "a\u{301}"
+        let body = NSAttributedString(string: "\u{fffc}", attributes: [
+            NSAttributedString.Key("__kIMMessagePartAttributeName"): NSNumber(value: 0),
+            NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"): stored,
+        ])
+        let archive = NSArchiver.archivedData(withRootObject: body).map { String(format: "%02x", $0) }.joined()
+        try fx.exec("""
+            UPDATE message SET attributedBody=X'\(archive)' WHERE ROWID=60;
+            UPDATE attachment SET guid=CAST(X'61CC81' AS TEXT) WHERE ROWID=10;
+            """)
+        let deps = dependencies(fx) { _ in
+            Issue.record("GUID preview launched a worker")
+            throw WorkerProtocolError.malformedFrame
+        }
+        let equal = try run(fx, flags: ["--dry-run", "--expected-attachment-guid", stored], dependencies: deps)
+        #expect(equal.1 == nil)
+        let composed = try run(fx, flags: ["--dry-run", "--expected-attachment-guid", "\u{e1}"], dependencies: deps)
+        #expect(composed.1 == AppleExit.usage)
+        #expect(composed.0.contains("expected attachment GUID"))
+    }
+
     @Test func verifierRejectsGenericACKFailureAndExpiredContext() throws {
         let fx = try fixture()
         let deps = dependencies(fx) { action in

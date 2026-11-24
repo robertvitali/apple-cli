@@ -20,6 +20,10 @@ struct MessagesAttachmentRetrieve: ParsableCommand {
     @Option(name: .long) var messageRowid: Int64?
     @Option(name: .long) var messageGuid: String?
     @Option(name: .long, help: "Exact native attachment part index from messages get.") var partIndex: Int?
+    @Option(name: .customLong("expected-attachment-guid"),
+            help: "Require the selected part to still have the attachment GUID reported by messages get.")
+    var expectedAttachmentGUIDs: [String] = []
+
     @Flag(name: .customLong("experimental-ui-handoff"), help: "Allow bounded Messages UI attachment loading.")
     var experimentalUIHandoff = false
 
@@ -73,6 +77,11 @@ struct MessagesAttachmentRetrieve: ParsableCommand {
             guard let participant = capture.request.participantHandles.first,
                   capture.request.participantHandles.count == 1,
                   Send.isAllowlisted(participant, among: gate.allowedRecipients) else { throw AppleError.safetyViolation("sandboxed attachment target requires one allowed direct recipient", sandbox: true) }
+        }
+        for expected in expectedAttachmentGUIDs {
+            guard expected.utf8.elementsEqual(capture.request.selectedAttachmentGUID.utf8) else {
+                throw AppleError.validation("the selected part does not match the expected attachment GUID")
+            }
         }
         return capture.request
     }
