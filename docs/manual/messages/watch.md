@@ -58,7 +58,11 @@ Each stream tracks up to 250,000 message-to-conversation memberships to compare 
 
 Each stream retains at most 100,000 events and 64 MiB of event payload. If your checkpoint expires, the command reports `resynchronization_required`. Reconcile the current Messages state for your filter, then start a fresh stream and save its initial checkpoint. Events evicted from the old journal cannot be replayed.
 
-Streams persist after the watcher exits. The local registry holds up to four streams, including ones being created or retired. Run `apple messages event-streams list` to inspect their IDs and retention bounds. If starting a stream returns `streamRegistryFull`, preview retirement of an unused stream with `apple messages event-streams retire "$STREAM_ID" --dry-run`. After reviewing the preview, retire that exact stream with `apple messages event-streams retire "$STREAM_ID" --execute`. Retiring it invalidates its saved cursors.
+Streams persist after the watcher exits. The local registry holds up to four streams, including ones being created or retired. Run `apple messages event-streams list` to inspect their IDs and retention bounds.
+
+If a new baseline fails before `stream_started` and the error includes `stream_id=<id>`, look up that exact ID. If that ID is listed as `incomplete`, it occupies a slot and has no usable cursor. To reclaim that slot, set `STREAM_ID` to the ID from the error and preview retirement with `apple messages event-streams retire "$STREAM_ID" --dry-run`. The preview leaves the slot occupied. After checking the ID in the preview, free that slot with `apple messages event-streams retire "$STREAM_ID" --execute`. Correct the original baseline error before starting a fresh stream.
+
+If startup returns `streamRegistryFull`, list the streams and use the same preview and retirement steps for one you no longer need. Retiring a stream invalidates its saved cursors.
 
 Every control carries `stream_id` and `last_committed_cursor`. `stream_started` reports head sequence `"0"` and a null oldest sequence. `stream_resumed` includes the requested `resume_after_cursor`, the current `head_sequence`, and `oldest_retained_sequence` (null when no events are retained). Sequence fields are decimal strings. For example, if you resume after sequence 2 and the control reports head 10, keep your sequence-2 checkpoint until you process event 3.
 
