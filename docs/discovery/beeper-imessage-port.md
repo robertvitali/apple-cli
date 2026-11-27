@@ -435,6 +435,13 @@ support or live reliability.
    validates existing output/path controls and verifies the resulting readable file.
 8. Typing on/off uses a bounded lifetime and ownership-checked cleanup; activity observation reports
    unknown distinctly. Document platform limits, including group typing support.
+   On macOS 27.2.1, a historical view exposed more than ten direct
+   Accessibility children of the transcript and omitted the newest saved
+   message. If that message is absent from the inspected view of the target
+   conversation, or its visibility is unverified, report any missing typing
+   indicator or Focus control as unknown. Even when the newest message is
+   visible, a missing indicator alone cannot establish that the recipient
+   is idle or has Focus off.
 9. Edit requires an eligible own sent message, preview, runtime eligibility check
    and persisted content/history verification.
 10. Undo Send is explicitly named and requires own-message and time/eligibility
